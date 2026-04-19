@@ -35,9 +35,18 @@ router.post('/events', async (req, res) => {
     });
 
     const alerts = detectRules({ ...event }, agentConfig);
+    const io = req.app.get('io');
+
     for (const alert of alerts) {
-      await prisma.alert.create({ data: alert });
+      const createdAlert = await prisma.alert.create({ data: alert });
       console.log(`[ALERT][${alert.severity}] ${alert.ruleName} - Agent: ${agentId}`);
+
+      // Broadcast to all connected dashboard clients in real-time
+      if (io) {
+        io.to('dashboards').emit('alert_notification', {
+          alert: { ...createdAlert, agentHostname: agent?.hostname },
+        });
+      }
     }
 
     res.status(201).json({ event, alertsGenerated: alerts.length });

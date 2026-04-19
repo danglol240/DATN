@@ -45,12 +45,27 @@ model Alert {
 }
 
 model Command {
-  id        String   @id @default(uuid())
-  agentId   String
-  action    String
-  params    String   @default("{}")
-  status    String   @default("pending")
-  createdAt DateTime @default(now())
-  doneAt    DateTime?
-  agent     Agent    @relation(fields: [agentId], references: [id])
+  id         String    @id @default(uuid())
+  agentId    String
+  action     String
+  params     String    @default("{}")
+  status     String    @default("pending")
+  createdAt  DateTime  @default(now())
+  doneAt     DateTime?
+  batchJobId String?
+  agent      Agent     @relation(fields: [agentId], references: [id])
+}
+
+model BatchJob {
+  id               String   @id @default(uuid())
+  action           String
+  params           String   @default("{}")
+  totalAgents      Int
+  successfulAgents String[]
+  failedAgents     String[]
+  retryCount       Int      @default(0)
+  maxRetries       Int      @default(3)
+  status           String   @default("pending")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
 }
