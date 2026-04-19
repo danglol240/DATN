@@ -2,6 +2,7 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
+// Hàm nội bộ: tạo lệnh trong DB và gửi real-time qua socket nếu agent đang kết nối
 async function _createAndDispatch(agentId, action, params, io, agentSockets, batchJobId = null) {
   const agent = await prisma.agent.findUnique({ where: { id: agentId } });
   if (!agent) return { ok: false, error: 'Agent không tồn tại', agentId };
@@ -18,6 +19,7 @@ async function _createAndDispatch(agentId, action, params, io, agentSockets, bat
 
   console.log(`[CMD] Lưu lệnh "${action}" tới DB cho agent ${agent.hostname} (${agentId})`);
 
+  // Ưu tiên gửi qua socket để agent nhận ngay, nếu không có socket thì agent tự poll
   const socketId = agentSockets && agentSockets[agentId];
   if (io && socketId) {
     io.to(socketId).emit('new_command', command);
@@ -53,8 +55,8 @@ exports.sendCommand = async (req, res) => {
 
 /**
  * POST /api/commands/batch
- * Promise.allSettled so one failing agent never aborts the whole batch.
- * Creates a BatchJob record so the retry worker and dashboard can track progress.
+ * Dùng Promise.allSettled để một agent lỗi không làm hỏng cả batch.
+ * Tạo bản ghi BatchJob để retry worker và dashboard theo dõi tiến trình.
  */
 exports.sendBatchCommand = async (req, res) => {
   try {
@@ -68,7 +70,7 @@ exports.sendBatchCommand = async (req, res) => {
     const io = req.app.get('io');
     const agentSockets = req.app.get('agentSockets');
 
-    // Create the BatchJob first so we can link commands to it
+    // Tạo BatchJob trước để có ID gắn vào từng command con
     const batchJob = await prisma.batchJob.create({
       data: {
         action,
@@ -95,6 +97,7 @@ exports.sendBatchCommand = async (req, res) => {
           : { agentId: r.value.agentId, error: r.value.error }
       );
 
+    // Xác định trạng thái tổng thể của batch sau khi dispatch xong
     const jobStatus =
       failed.length === 0 ? 'dispatched' :
       succeeded.length === 0 ? 'failure' : 'partial_failure';
@@ -108,7 +111,7 @@ exports.sendBatchCommand = async (req, res) => {
       },
     });
 
-    // Broadcast initial dispatch result to all dashboard clients
+    // Thông báo kết quả dispatch ban đầu tới tất cả dashboard
     io?.to('dashboards').emit('batch_progress', {
       batchJobId: batchJob.id,
       success: succeeded.length,
@@ -132,8 +135,8 @@ exports.sendBatchCommand = async (req, res) => {
 
 /**
  * GET /api/agents/:agentId/commands
- * Transaction atomically fetches pending commands and marks them in_progress,
- * preventing two concurrent polls from claiming the same work.
+ * Transaction nguyên tử: lấy các lệnh pending và chuyển sang in_progress,
+ * tránh tình huống hai poll đồng thời cùng nhận một lệnh.
  */
 exports.pollCommands = async (req, res) => {
   try {
@@ -163,8 +166,8 @@ exports.pollCommands = async (req, res) => {
 
 /**
  * PATCH /api/commands/:id/done
- * Marks a command done/failed, emits command_result to dashboards,
- * and updates the parent BatchJob progress counter if applicable.
+ * Đánh dấu lệnh hoàn thành/thất bại, phát command_result tới dashboard,
+ * đồng thời cập nhật bộ đếm tiến trình BatchJob nếu lệnh thuộc một batch.
  */
 exports.markDone = async (req, res) => {
   try {
@@ -184,12 +187,13 @@ exports.markDone = async (req, res) => {
         batchJobId: command.batchJobId ?? null,
       });
 
-      // Keep BatchJob progress counters in sync
+      // Cập nhật bộ đếm BatchJob nếu lệnh này thuộc một batch
       if (command.batchJobId) {
         try {
           const isDone = command.status === 'done';
           const updatedJob = await prisma.batchJob.update({
             where: { id: command.batchJobId },
+            // Dùng Prisma array push để thêm agentId vào mảng thành công/thất bại
             data: isDone
               ? { successfulAgents: { push: command.agentId } }
               : { failedAgents: { push: command.agentId } },
@@ -198,6 +202,7 @@ exports.markDone = async (req, res) => {
           const totalDone = updatedJob.successfulAgents.length + updatedJob.failedAgents.length;
           let finalStatus = updatedJob.status;
           if (totalDone >= updatedJob.totalAgents) {
+            // Tất cả agent đã phản hồi — xác định kết quả cuối cùng
             finalStatus = updatedJob.failedAgents.length > 0 ? 'partial_failure' : 'success';
             await prisma.batchJob.update({
               where: { id: command.batchJobId },

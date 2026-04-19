@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { CheckCircle, XCircle, Loader, X } from 'lucide-react';
 import { useSocket } from '../hooks/useSocket';
 
+// Widget hiển thị tiến trình thực thi lệnh batch theo thời gian thực
 export default function BatchProgress({ batchJobId, total, initialSuccess = 0, initialFailed = 0, onClose }) {
   const [progress, setProgress] = useState({
     success: initialSuccess,
@@ -16,6 +17,7 @@ export default function BatchProgress({ batchJobId, total, initialSuccess = 0, i
 
   useEffect(() => {
     if (!batchJobId) return;
+    // Lắng nghe sự kiện batch_progress và chỉ cập nhật nếu đúng batchJobId này
     return on('batch_progress', (data) => {
       if (data.batchJobId === batchJobId) {
         setProgress({ success: data.success, failed: data.failed, status: data.status });
@@ -23,6 +25,7 @@ export default function BatchProgress({ batchJobId, total, initialSuccess = 0, i
     });
   }, [on, batchJobId]);
 
+  // Màu thanh tiến trình thể hiện trạng thái tổng thể của batch
   const barColor =
     progress.status === 'success'         ? 'bg-green-500' :
     progress.status === 'partial_failure' ? 'bg-orange-500' :
@@ -42,6 +45,7 @@ export default function BatchProgress({ batchJobId, total, initialSuccess = 0, i
         </button>
       </div>
 
+      {/* Thanh tiến trình */}
       <div className="w-full bg-[#111217] rounded-full h-1.5 mb-3">
         <div
           className={`h-1.5 rounded-full transition-all duration-500 ${barColor}`}
@@ -59,6 +63,7 @@ export default function BatchProgress({ batchJobId, total, initialSuccess = 0, i
         </span>
       </div>
 
+      {/* Trạng thái đang chờ phản hồi từ agent */}
       {!isComplete && (
         <div className="flex items-center gap-2 text-xs text-gray-500 mt-1">
           <Loader size={11} className="animate-spin" />
@@ -66,6 +71,7 @@ export default function BatchProgress({ batchJobId, total, initialSuccess = 0, i
         </div>
       )}
 
+      {/* Một số agent thất bại — retry worker sẽ tự xử lý */}
       {isComplete && progress.failed > 0 && (
         <p className="text-xs text-orange-400 mt-1">
           {progress.failed} agent(s) failed — will retry automatically.

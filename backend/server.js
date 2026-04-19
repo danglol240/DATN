@@ -8,14 +8,18 @@ const { startRetryWorker } = require('./workers/retryWorker');
 
 const app = express();
 const server = http.createServer(app);
+
+// Cho phép kết nối từ mọi origin (trong môi trường production nên giới hạn lại)
 const io = new Server(server, { cors: { origin: '*' } });
 
-// agentId → socketId mapping shared with controllers via app.set
+// Bảng ánh xạ agentId → socketId, lưu trong RAM, chia sẻ qua app.set
 const agentSockets = {};
 
+// Đăng ký các sự kiện Socket.IO và khởi động worker tự động retry
 registerSocketEvents(io, agentSockets);
 startRetryWorker(io, agentSockets);
 
+// Chia sẻ io và agentSockets cho các controller qua req.app.get(...)
 app.set('io', io);
 app.set('agentSockets', agentSockets);
 
