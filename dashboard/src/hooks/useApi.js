@@ -1,0 +1,86 @@
+import { useState, useEffect, useCallback } from 'react';
+
+const BASE = 'http://localhost:3000/api';
+
+// Hook chung để poll dữ liệu từ API với interval tùy chỉnh
+function usePoll(url, interval = 10000) {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  const fetchData = useCallback(async () => {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setData(json);
+      setError(null);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [url]);
+
+  useEffect(() => {
+    fetchData();
+    const id = setInterval(fetchData, interval);
+    return () => clearInterval(id);
+  }, [fetchData, interval]);
+
+  return { data, loading, error, refetch: fetchData };
+}
+
+// Cac hook cụ thể cho từng loại dữ liệu
+
+export function useStats() {
+  return usePoll(`${BASE}/stats`, 8000);
+}
+
+export function useAgents() {
+  return usePoll(`${BASE}/agents`, 10000);
+}
+
+export function useAlerts(params = '') {
+  return usePoll(`${BASE}/alerts${params}`, 8000);
+}
+
+export function useEvents(params = '') {
+  return usePoll(`${BASE}/events${params}`, 10000);
+}
+
+export function useCommandHistory(agentId) {
+  const { data, loading, error, refetch } = usePoll(
+    agentId ? `${BASE}/agents/${agentId}/commands/history` : null,
+    5000
+  );
+  return { data, loading, error, refetch };
+}
+
+// Các hàm gọi API không dùng hook vì chỉ gọi khi có sự kiện (như click)
+
+export async function sendCommand(agentId, action, params = {}) {
+  const res = await fetch(`${BASE}/agents/${agentId}/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, params }),
+  });
+  if (!res.ok) throw new Error(`sendCommand failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function sendCommandBatch(agentIds, action, params = {}) {
+  const res = await fetch(`${BASE}/commands/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ agentIds, action, params }),
+  });
+  if (!res.ok) throw new Error(`sendCommandBatch failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function resolveAlert(alertId) {
+  const res = await fetch(`${BASE}/alerts/${alertId}/resolve`, { method: 'PATCH' });
+  if (!res.ok) throw new Error(`resolveAlert failed: HTTP ${res.status}`);
+  return res.json();
+}

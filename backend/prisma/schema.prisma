@@ -1,0 +1,56 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Agent {
+  id            String    @id @default(uuid())
+  hostname      String
+  ip            String
+  os            String?
+  status        String    @default("online")
+  lastHeartbeat DateTime  @default(now())
+  cpuPercent    Float?
+  memPercent    Float?
+  rulesConfig   String    @default("{}")
+  iptablesRules String?
+  interfaces    String?
+  alerts        Alert[]
+  events        Event[]
+  commands      Command[]
+}
+
+model Event {
+  id        String   @id @default(uuid())
+  agentId   String
+  type      String
+  data      String
+  timestamp DateTime @default(now())
+  agent     Agent    @relation(fields: [agentId], references: [id])
+}
+
+model Alert {
+  id          String   @id @default(uuid())
+  agentId     String
+  severity    String
+  ruleName    String
+  description String
+  resolved    Boolean  @default(false)
+  timestamp   DateTime @default(now())
+  agent       Agent    @relation(fields: [agentId], references: [id])
+}
+
+model Command {
+  id        String   @id @default(uuid())
+  agentId   String
+  action    String
+  params    String   @default("{}")
+  status    String   @default("pending")
+  createdAt DateTime @default(now())
+  doneAt    DateTime?
+  agent     Agent    @relation(fields: [agentId], references: [id])
+}

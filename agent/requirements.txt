@@ -1,0 +1,5 @@
+psutil
+requests
+pyyaml
+python-socketio[client]
+websocket-client
