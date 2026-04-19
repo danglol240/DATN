@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import IptablesControl from '../components/IptablesControl';
 import EditRule from '../components/EditRule';
 import BatchProgress from '../components/BatchProgress';
+import BatchRuleModal from '../components/BatchRuleModal';
 import { useAgents } from '../hooks/useApi';
 import { useSocket } from '../hooks/useSocket';
 import { Monitor, Search, MoreVertical, LayoutGrid, Users, ShieldAlert, ArrowLeft, RefreshCw, Trash2, Plus, Settings, X, Layers } from 'lucide-react';
@@ -64,8 +65,6 @@ export default function Agents() {
   // Batch selection
   const [selectedAgentIds, setSelectedAgentIds] = useState(new Set());
   const [showBatchModal, setShowBatchModal] = useState(false);
-  const [batchRule, setBatchRule] = useState({ action: 'DROP', protocol: 'tcp', chain: 'INPUT', port: '', src: '' });
-  const [batchSubmitting, setBatchSubmitting] = useState(false);
   const [batchJobInfo, setBatchJobInfo] = useState(null); // { batchJobId, total, initialSuccess, initialFailed }
 
   // Keep activeAgent in sync when liveAgents updates (metrics push, reconnect)
@@ -358,22 +357,28 @@ export default function Agents() {
     setSelectedAgentIds(e.target.checked ? new Set(filteredAgents.map(a => a.id)) : new Set());
   };
 
-  const handleBatchSubmit = async (e) => {
-    e.preventDefault();
-    if (['tcp', 'udp'].includes(batchRule.protocol) && !batchRule.port.trim())
-      return alert('Port is required for TCP/UDP rules.');
-    setBatchSubmitting(true);
+  const handleBatchSubmit = async (rule) => {
     try {
       const result = await sendCommandBatch(Array.from(selectedAgentIds), 'add_rule', {
-        chain:   batchRule.chain,
-        protocol: batchRule.protocol,
-        port:    batchRule.port,
-        target:  batchRule.action,
-        src:     batchRule.src || undefined,
-        srcType: batchRule.src ? 'single' : 'any',
+        chain:     rule.chain,
+        priority:  rule.priority,
+        protocol:  rule.protocol,
+        port:      rule.port,
+        target:    rule.action,
+        log:       rule.log || false,
+        logPrefix: rule.logPrefix || `FW_LOG_${rule.action}: `,
+        states:    rule.states || [],
+        srcType:   rule.srcType,
+        src:       rule.src,
+        srcMask:   rule.srcMask,
+        srcInvert: rule.srcInvert,
+        sport:     rule.sport,
+        dstType:   rule.dstType,
+        dst:       rule.dst,
+        dstMask:   rule.dstMask,
+        dstInvert: rule.dstInvert,
       });
 
-      // Show real-time BatchProgress widget
       setBatchJobInfo({
         batchJobId:     result.batchJobId,
         total:          selectedAgentIds.size,
@@ -382,12 +387,9 @@ export default function Agents() {
       });
 
       setShowBatchModal(false);
-      setBatchRule({ action: 'DROP', protocol: 'tcp', chain: 'INPUT', port: '', src: '' });
       setSelectedAgentIds(new Set());
     } catch (err) {
       alert('Batch dispatch failed: ' + err.message);
-    } finally {
-      setBatchSubmitting(false);
     }
   };
 
@@ -523,84 +525,13 @@ export default function Agents() {
         </div>
       </div>
 
-      {/* Batch Rule Modal */}
+      {/* Batch Rule Modal — full EditRule-style form */}
       {showBatchModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
-          <div className="bg-[#1C1D24] border border-[#2E2F3A] rounded-xl shadow-2xl w-full max-w-lg overflow-hidden">
-            <div className="bg-[#25262E] border-b border-[#3A3B45] px-6 py-4 flex items-center justify-between">
-              <h2 className="text-base font-semibold text-white flex items-center gap-2">
-                <Layers size={16} className="text-blue-400" />
-                Push Iptables Rule — {selectedAgentIds.size} Devices
-              </h2>
-              <button onClick={() => setShowBatchModal(false)} className="text-gray-400 hover:text-white"><X size={20} /></button>
-            </div>
-            <form onSubmit={handleBatchSubmit} className="text-sm">
-              <div className="grid grid-cols-[140px_1fr] border-b border-[#2E2F3A]">
-                <div className="bg-[#25262E] p-4 text-gray-300 font-medium flex items-center">Chain</div>
-                <div className="p-4 bg-[#111217]">
-                  <select value={batchRule.chain} onChange={e => setBatchRule({...batchRule, chain: e.target.value})}
-                    className="bg-[#1C1D24] border border-[#3A3B45] text-white rounded px-3 py-2 w-full focus:outline-none focus:border-blue-500">
-                    <option value="INPUT">INPUT</option>
-                    <option value="FORWARD">FORWARD</option>
-                    <option value="OUTPUT">OUTPUT</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] border-b border-[#2E2F3A]">
-                <div className="bg-[#25262E] p-4 text-gray-300 font-medium flex items-center">Action</div>
-                <div className="p-4 bg-[#111217]">
-                  <select value={batchRule.action} onChange={e => setBatchRule({...batchRule, action: e.target.value})}
-                    className="bg-[#1C1D24] border border-[#3A3B45] text-white rounded px-3 py-2 w-full focus:outline-none focus:border-blue-500">
-                    <option value="ACCEPT">ACCEPT</option>
-                    <option value="DROP">DROP</option>
-                    <option value="REJECT">REJECT</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] border-b border-[#2E2F3A]">
-                <div className="bg-[#25262E] p-4 text-gray-300 font-medium flex items-center">Protocol</div>
-                <div className="p-4 bg-[#111217]">
-                  <select value={batchRule.protocol} onChange={e => setBatchRule({...batchRule, protocol: e.target.value})}
-                    className="bg-[#1C1D24] border border-[#3A3B45] text-white rounded px-3 py-2 w-full focus:outline-none focus:border-blue-500">
-                    <option value="tcp">TCP</option>
-                    <option value="udp">UDP</option>
-                    <option value="icmp">ICMP</option>
-                    <option value="all">Any</option>
-                  </select>
-                </div>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] border-b border-[#2E2F3A]">
-                <div className="bg-[#25262E] p-4 text-gray-300 font-medium flex items-center">Destination Port</div>
-                <div className="p-4 bg-[#111217]">
-                  <input type="text" placeholder="e.g. 80, 443"
-                    value={batchRule.port} onChange={e => setBatchRule({...batchRule, port: e.target.value})}
-                    disabled={batchRule.protocol === 'icmp' || batchRule.protocol === 'all'}
-                    className="bg-[#1C1D24] border border-[#3A3B45] text-white rounded px-3 py-2 w-full font-mono focus:outline-none focus:border-blue-500 disabled:opacity-50" />
-                </div>
-              </div>
-              <div className="grid grid-cols-[140px_1fr] border-b border-[#2E2F3A]">
-                <div className="bg-[#25262E] p-4 text-gray-300 font-medium flex items-center">
-                  Source IP <span className="ml-1 text-gray-500 font-normal">(opt)</span>
-                </div>
-                <div className="p-4 bg-[#111217]">
-                  <input type="text" placeholder="e.g. 10.0.0.0/8 — leave blank for any"
-                    value={batchRule.src} onChange={e => setBatchRule({...batchRule, src: e.target.value})}
-                    className="bg-[#1C1D24] border border-[#3A3B45] text-white rounded px-3 py-2 w-full font-mono focus:outline-none focus:border-blue-500" />
-                </div>
-              </div>
-              <div className="bg-[#25262E] p-4 flex gap-3 justify-end border-t border-[#3A3B45]">
-                <button type="button" onClick={() => setShowBatchModal(false)}
-                  className="px-5 py-2 text-gray-300 hover:text-white hover:bg-gray-700/50 rounded transition font-medium">
-                  Cancel
-                </button>
-                <button type="submit" disabled={batchSubmitting}
-                  className="px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded disabled:opacity-50 transition font-medium flex items-center gap-2">
-                  {batchSubmitting ? 'Dispatching…' : `Dispatch to ${selectedAgentIds.size} Devices`}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <BatchRuleModal
+          selectedCount={selectedAgentIds.size}
+          onSubmit={handleBatchSubmit}
+          onCancel={() => setShowBatchModal(false)}
+        />
       )}
 
       {/* Batch progress widget — floats bottom-right */}

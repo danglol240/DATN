@@ -1,14 +1,17 @@
 const { PrismaClient } = require('@prisma/client');
-const { detectRules } = require('../services/ruleEngine');
 
 const prisma = new PrismaClient();
 
+// Socket.IO chỉ phục vụ 2 mục đích:
+//   1. Dashboard join room 'dashboards' để nhận broadcast
+//   2. Agent đăng ký để nhận lệnh điều khiển real-time
+// Metrics KHÔNG đi qua socket — agent gửi qua HTTP /api/heartbeat mỗi 45s
 function registerSocketEvents(io, agentSockets) {
   io.on('connection', (socket) => {
     console.log(`[WS] Client connected: ${socket.id}`);
 
     // Dashboard client gửi sự kiện này để vào room 'dashboards'
-    // nhằm nhận các broadcast (alert, batch_progress, agent_metrics…)
+    // nhằm nhận các broadcast (alert_notification, batch_progress, command_result…)
     socket.on('join_dashboard', () => {
       socket.join('dashboards');
       console.log(`[WS] Dashboard joined room: ${socket.id}`);
@@ -28,31 +31,6 @@ function registerSocketEvents(io, agentSockets) {
 
       // Thông báo cho tất cả dashboard biết có agent vừa kết nối
       io.to('dashboards').emit('agent_connected', { agentId, timestamp: new Date() });
-    });
-
-    // Agent đẩy metrics mỗi 10 giây qua socket thay vì HTTP heartbeat
-    // để dashboard cập nhật real-time mà không cần polling
-    socket.on('metrics_update', async (data) => {
-      const { agentId, cpu_percent, memory_percent, iptables_rules, network_interfaces, hostname } = data;
-      try {
-        await prisma.agent.update({
-          where: { id: agentId },
-          data: {
-            cpuPercent: cpu_percent,
-            memPercent: memory_percent,
-            iptablesRules: iptables_rules ?? null,
-            interfaces: network_interfaces ? JSON.stringify(network_interfaces) : null,
-            lastHeartbeat: new Date(),
-            status: 'online',
-            ...(hostname ? { hostname } : {}),
-          },
-        });
-      } catch (e) {
-        console.error('[WS] metrics_update DB error:', e.message);
-      }
-
-      // Phát lại metrics tới tất cả dashboard đang mở
-      io.to('dashboards').emit('agent_metrics', data);
     });
 
     // Xử lý khi socket bị ngắt kết nối (agent tắt hoặc mất mạng)

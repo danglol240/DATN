@@ -139,42 +139,99 @@ def execute_command_logic(backend_url, agent_id, cmd):
         logging.error(f"[CMD] Lỗi thực thi lệnh: {e}")
 
 
-def socket_metrics_thread(agent_id, hostname):
-    """Push metrics via Socket.IO every 10 s for real-time dashboard updates.
-    Runs as a daemon thread alongside the HTTP heartbeat loop."""
+# ---------------------------------------------------------------------------
+# METRICS — HTTP, mỗi 45s
+# Gửi đầy đủ CPU/RAM/iptables lên backend và quét kết nối nghi ngờ.
+# Tách khỏi heartbeat để dashboard luôn có dữ liệu mới mà không tốn băng thông
+# heartbeat.
+# ---------------------------------------------------------------------------
+def metrics_thread_fn(backend_url, agent_id, hostname, interval=60):
     while True:
-        time.sleep(10)
-        if not sio.connected:
-            continue
+        time.sleep(interval)
         try:
-            metrics  = collect_metrics()
-            iptables = get_current_iptables()
-            sio.emit('metrics_update', {
-                'agentId':            agent_id,
-                'hostname':           hostname,
-                'cpu_percent':        metrics['cpu_percent'],
-                'memory_percent':     metrics['memory_percent'],
-                'network_interfaces': metrics.get('network_interfaces', []),
-                'iptables_rules':     iptables,
-            })
+            metrics       = collect_metrics()
+            iptables_rules = get_current_iptables()
+            payload = {
+                "agentId":            agent_id,
+                "hostname":           hostname,
+                "cpu_percent":        metrics['cpu_percent'],
+                "memory_percent":     metrics['memory_percent'],
+                "network_interfaces": metrics.get("network_interfaces", []),
+                "iptables_rules":     iptables_rules,
+            }
+            requests.post(f"{backend_url}/api/heartbeat", json=payload, timeout=5)
+            logging.info(f"[METRICS] CPU {metrics['cpu_percent']}% | RAM {metrics['memory_percent']}%")
+
+            # Quét và tự động chặn các kết nối nghi ngờ
+            for conn in get_suspicious_network_connections():
+                remote_ip = conn['remote_ip']
+                logging.warning(f"[METRICS] Kết nối nghi ngờ: {remote_ip}:{conn['remote_port']}")
+                if block_ip(remote_ip):
+                    send_event(backend_url, agent_id, 'Network',
+                               {"action": "blocked_ip", "connection": conn})
         except Exception as e:
-            logging.error(f"[SOCKET] Lỗi gửi metrics: {e}")
+            logging.error(f"[METRICS] Lỗi: {e}")
+
+
+# ---------------------------------------------------------------------------
+# HEARTBEAT — HTTP, mỗi 120s
+# Ping đơn giản để backend xác nhận agent còn sống, dự phòng khi metrics lỗi.
+# ---------------------------------------------------------------------------
+def heartbeat_thread_fn(backend_url, agent_id, hostname, interval=120):
+    while True:
+        time.sleep(interval)
+        try:
+            requests.post(
+                f"{backend_url}/api/heartbeat",
+                json={"agentId": agent_id, "hostname": hostname},
+                timeout=5,
+            )
+            logging.info("[HEARTBEAT] Ping OK")
+        except Exception as e:
+            logging.error(f"[HEARTBEAT] Lỗi: {e}")
+
+
+# ---------------------------------------------------------------------------
+# RETRY — Background task trên agent, mỗi 60s
+# Agent tự kiểm tra và thực thi các lệnh pending bị bỏ lỡ (do mất socket,
+# backend restart, hoặc dispatch xảy ra trước khi agent kịp đăng ký lại).
+# Không cần backend tạo lại lệnh — agent chủ động pull và tự xử lý.
+# ---------------------------------------------------------------------------
+def retry_thread_fn(backend_url, agent_id, interval=60):
+    while True:
+        time.sleep(interval)
+        try:
+            res = requests.get(f"{backend_url}/api/agents/{agent_id}/commands", timeout=5)
+            cmds = res.json()
+            if cmds:
+                logging.info(f"[RETRY] Tìm thấy {len(cmds)} lệnh pending — thực thi lại")
+                for cmd in cmds:
+                    threading.Thread(
+                        target=execute_command_logic,
+                        args=(backend_url, agent_id, cmd),
+                        daemon=True,
+                    ).start()
+        except Exception as e:
+            logging.error(f"[RETRY] Lỗi poll lệnh: {e}")
 
 
 def main():
     config      = load_config()
     backend_url = config.get('backend_url', 'http://localhost:3000')
-    interval    = config.get('heartbeat_interval', 120)
     agent_id    = get_agent_id()
     hostname    = socket.gethostname()
 
     logging.info(f"== Agent Khởi Động | ID: {agent_id} ==")
 
+    # ------------------------------------------------------------------
+    # WebSocket — CHỈ dùng để nhận lệnh điều khiển real-time (Command)
+    # Metrics không đi qua socket nữa, tránh phụ thuộc kết nối liên tục
+    # ------------------------------------------------------------------
     @sio.event
     def connect():
         logging.info("WebSocket: Đã kết nối với backend")
         sio.emit('register_agent', agent_id)
-        # Catch up on any commands that arrived while we were offline
+        # Pull lệnh bị bỏ lỡ trong thời gian mất kết nối
         try:
             res = requests.get(f"{backend_url}/api/agents/{agent_id}/commands", timeout=5)
             for cmd in res.json():
@@ -188,6 +245,7 @@ def main():
 
     @sio.event
     def new_command(data):
+        # Backend thông báo có lệnh mới → pull ngay để nhận đầy đủ dữ liệu
         logging.info("WebSocket: Nhận sự kiện new_command")
         try:
             res = requests.get(f"{backend_url}/api/agents/{agent_id}/commands", timeout=5)
@@ -206,38 +264,15 @@ def main():
                 logging.error(f"Lỗi kết nối WebSocket: {e}")
                 time.sleep(5)
 
-    threading.Thread(target=ws_thread, daemon=True).start()
-    threading.Thread(target=socket_metrics_thread, args=(agent_id, hostname), daemon=True).start()
+    # Khởi động 4 luồng chạy song song
+    threading.Thread(target=ws_thread,          daemon=True).start()
+    threading.Thread(target=metrics_thread_fn,  args=(backend_url, agent_id, hostname), daemon=True).start()
+    threading.Thread(target=heartbeat_thread_fn, args=(backend_url, agent_id, hostname), daemon=True).start()
+    threading.Thread(target=retry_thread_fn,    args=(backend_url, agent_id), daemon=True).start()
 
-    # HTTP heartbeat loop — reliable DB sync fallback when socket is unavailable
+    # Main thread chỉ giữ process sống — mọi công việc đã chạy trong daemon threads
     while True:
-        metrics       = collect_metrics()
-        iptables_rules = get_current_iptables()
-        payload = {
-            "agentId":            agent_id,
-            "hostname":           hostname,
-            "cpu_percent":        metrics['cpu_percent'],
-            "memory_percent":     metrics['memory_percent'],
-            "network_interfaces": metrics.get("network_interfaces", []),
-            "iptables_rules":     iptables_rules,
-        }
-        try:
-            requests.post(f"{backend_url}/api/heartbeat", json=payload, timeout=5)
-            logging.info(f"Heartbeat: CPU {metrics['cpu_percent']}% | RAM {metrics['memory_percent']}%")
-
-            suspicious_conns = get_suspicious_network_connections()
-            for conn in suspicious_conns:
-                remote_ip = conn['remote_ip']
-                logging.warning(f"Phát hiện kết nối nghi ngờ tới {remote_ip}:{conn['remote_port']}")
-                if block_ip(remote_ip):
-                    send_event(backend_url, agent_id, 'Network',
-                               {"action": "blocked_ip", "connection": conn})
-        except requests.exceptions.RequestException as e:
-            logging.error(f"Lỗi kết nối Backend: {e}")
-        except Exception as e:
-            logging.error(f"Lỗi nội bộ Agent: {e}")
-
-        time.sleep(interval)
+        time.sleep(3600)
 
 
 if __name__ == "__main__":
