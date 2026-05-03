@@ -1,0 +1,21 @@
+groups:
+- name: agent-alerts
+  rules:
+
+  - alert: HighCPU
+    expr: agent_cpu_usage > 80
+    for: 1m
+    labels:
+      severity: warning
+
+  - alert: HighMemory
+    expr: agent_memory_usage > 85
+    for: 1m
+    labels:
+      severity: warning
+
+  - alert: AgentDown
+    expr: up{job="agents"} == 0
+    for: 2m
+    labels:
+      severity: critical

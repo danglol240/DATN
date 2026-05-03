@@ -10,6 +10,7 @@ import subprocess
 import socketio
 from modules.collector import collect_metrics, get_suspicious_network_connections
 from modules.responder import block_ip, unblock_ip, add_custom_rule, delete_custom_rule, kill_process, delete_rule_by_num
+from modules.metric_exporter import run_metrics
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -269,6 +270,7 @@ def main():
     threading.Thread(target=metrics_thread_fn,  args=(backend_url, agent_id, hostname), daemon=True).start()
     threading.Thread(target=heartbeat_thread_fn, args=(backend_url, agent_id, hostname), daemon=True).start()
     threading.Thread(target=retry_thread_fn,    args=(backend_url, agent_id), daemon=True).start()
+    threading.Thread(target=run_metrics, daemon=True).start()
 
     # Main thread chỉ giữ process sống — mọi công việc đã chạy trong daemon threads
     while True:
