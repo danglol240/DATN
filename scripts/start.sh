@@ -1,52 +1,59 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-LOG_DIR=/var/log/edr
-PID_DIR=/var/run/edr
+LOG_DIR=$HOME/.edr/log
+PID_DIR=$HOME/.edr/run
 PROJECT=/home/danglol240/Desktop/files
 
-# prepare dirs
-sudo mkdir -p "$LOG_DIR" "$PID_DIR"
-sudo chown "$(whoami)":"$(whoami)" "$LOG_DIR" "$PID_DIR"
+mkdir -p "$LOG_DIR" "$PID_DIR"
 
-# start backend
+echo "$(date) Starting services..."
+
+# BACKEND
 (
   NODE_BIN=$(command -v node || command -v nodejs || true)
   if [ -n "$NODE_BIN" ]; then
-    cd "$PROJECT/backend"
-    nohup "$NODE_BIN" server.js > "$LOG_DIR/backend.log" 2>&1 &
-    echo $! > "$PID_DIR/backend.pid"
-  else
-    echo "$(date) [ERROR] node not found in PATH; skipping backend start" >> "$LOG_DIR/backend.log"
+    if [ -f "$PID_DIR/backend.pid" ] && kill -0 $(cat "$PID_DIR/backend.pid") 2>/dev/null; then
+      echo "Backend already running"
+    else
+      cd "$PROJECT/backend" || exit 1
+      echo "$(date) Starting backend..." >> "$LOG_DIR/backend.log"
+      nohup "$NODE_BIN" server.js >> "$LOG_DIR/backend.log" 2>&1 &
+      echo $! > "$PID_DIR/backend.pid"
+    fi
   fi
 )
 
-# start agent (venv + requirements if needed)
+# AGENT
 (
-  cd "$PROJECT/agent"
-  # prefer using the project's virtualenv if present
-  if [ -x ".venv/bin/python3" ]; then
-    # ensure venv has requirements
-    .venv/bin/python3 -m pip install --upgrade pip setuptools wheel >/dev/null 2>&1 || true
+  cd "$PROJECT/agent" || exit 1
+  echo "$(date) Starting agent..." >> "$LOG_DIR/agent.log"
+
+  if [ -x "venv/bin/python3" ]; then
     .venv/bin/python3 -m pip install -r requirements.txt >/dev/null 2>&1 || true
-    nohup .venv/bin/python3 main.py > "$LOG_DIR/agent.log" 2>&1 &
-    echo $! > "$PID_DIR/agent.pid"
+    nohup venv/bin/python3 main.py >> "$LOG_DIR/agent.log" 2>&1 &
   else
-    nohup python3 main.py > "$LOG_DIR/agent.log" 2>&1 &
-    echo $! > "$PID_DIR/agent.pid"
+    nohup python3 main.py >> "$LOG_DIR/agent.log" 2>&1 &
   fi
+
+  echo $! > "$PID_DIR/agent.pid"
 )
 
-# start frontend (dashboard)
+# FRONTEND
 (
+  export NVM_DIR="$HOME/.nvm"
+  [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+
   NPM_BIN=$(command -v npm || true)
+
   if [ -n "$NPM_BIN" ]; then
-    cd "$PROJECT/dashboard"
-    nohup "$NPM_BIN" run dev > "$LOG_DIR/frontend.log" 2>&1 &
+    cd "$PROJECT/dashboard" || exit 1
+    echo "$(date) Starting frontend..." >> "$LOG_DIR/frontend.log"
+    nohup "$NPM_BIN" run dev >> "$LOG_DIR/frontend.log" 2>&1 &
     echo $! > "$PID_DIR/frontend.pid"
   else
     echo "$(date) [ERROR] npm not found in PATH; skipping frontend start" >> "$LOG_DIR/frontend.log"
   fi
 )
 
-echo "started services"
+echo "All services started"

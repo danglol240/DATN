@@ -1,25 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PID_DIR=/var/run/edr
+PID_DIR=$HOME/.edr/run
 
 stop_pidfile() {
-  local f=$1
+  local name=$1
+  local f="$PID_DIR/$name.pid"
+
   if [ -f "$f" ]; then
     pid=$(cat "$f" 2>/dev/null || true)
-    if [ -n "$pid" ]; then sudo kill "$pid" >/dev/null 2>&1 || true; fi
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      echo "Stopping $name (PID $pid)..."
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+
+      # force kill nếu chưa chết
+      if kill -0 "$pid" 2>/dev/null; then
+        echo "Force killing $name..."
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+    else
+      echo "$name not running"
+    fi
+
     rm -f "$f"
+  else
+    echo "No PID file for $name"
   fi
 }
 
-stop_pidfile "$PID_DIR/backend.pid"
-stop_pidfile "$PID_DIR/agent.pid"
-stop_pidfile "$PID_DIR/frontend.pid"
+# stop theo PID file (ưu tiên)
+stop_pidfile backend
+stop_pidfile agent
+stop_pidfile frontend
 
-# fallback kills by process pattern (safe-ignore failures)
-# match the exact commands we start in start.sh
-sudo pkill -f "node server.js" >/dev/null 2>&1 || true
-sudo pkill -f "main.py" >/dev/null 2>&1 || true
-sudo pkill -f "npm run dev" >/dev/null 2>&1 || true
+# fallback (an toàn hơn)
+pkill -f "server.js" >/dev/null 2>&1 || true
+pkill -f "agent/main.py" >/dev/null 2>&1 || true
+pkill -f "npm run dev" >/dev/null 2>&1 || true
 
-echo "stopped services"
+echo "All services stopped"

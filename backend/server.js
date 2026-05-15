@@ -4,6 +4,7 @@ const http = require('http');
 const { Server } = require('socket.io');
 const apiRoutes = require('./src/routes/api');
 const { registerSocketEvents } = require('./src/socket/events');
+const client = require('prom-client');
 
 const app = express();
 const server = http.createServer(app);
@@ -31,4 +32,10 @@ server.listen(PORT, () => {
   console.log(`[EDR Backend] Server running on port ${PORT}`);
   console.log(`  - Socket.IO ready (Commands only)`);
   console.log(`  - Metrics via HTTP /api/heartbeat`);
+});
+
+client.collectDefaultMetrics();
+app.get('/metrics', async (req, res) => {
+  res.set('Content-Type', client.register.contentType);
+  res.end(await client.register.metrics());
 });
