@@ -15,8 +15,8 @@ router.get('/agents', agentController.listAgents);
 router.get('/stats', agentController.getStats);
 
 // COMMANDS (Dashboard ra lenh -> Agent thuc thi iptables)
+// Agent nhan lenh qua heartbeat response, khong con endpoint poll rieng.
 router.post('/agents/:agentId/commands', commandController.sendCommand);
-router.get('/agents/:agentId/commands', commandController.pollCommands);
 router.patch('/commands/:id/done', commandController.markDone);
 router.get('/agents/:agentId/commands/history', commandController.commandHistory);
 router.post('/commands/batch', commandController.sendBatchCommand);

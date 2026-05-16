@@ -56,4 +56,15 @@ echo "$(date) Starting services..."
   fi
 )
 
+# MONITOR STACK (Prometheus + Grafana + Redis Exporter)
+(
+  if command -v docker >/dev/null 2>&1; then
+    cd "$PROJECT/monitor" || exit 1
+    echo "$(date) Starting monitor stack..." >> "$LOG_DIR/monitor.log"
+    docker compose up -d >> "$LOG_DIR/monitor.log" 2>&1
+  else
+    echo "$(date) [SKIP] docker not found; skipping monitor stack" >> "$LOG_DIR/monitor.log"
+  fi
+)
+
 echo "All services started"

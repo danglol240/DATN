@@ -1,8 +1,11 @@
 const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
-const { detectRules } = require('../services/ruleEngine');
+const { dequeueCommands, markInProgress } = require('../lib/redis');
+const { signCommand } = require('../lib/security');
 
-// POST /api/heartbeat - Agent gửi heartbeat kèm thông tin hệ thống
+const prisma = new PrismaClient();
+
+// POST /api/heartbeat
+// Agent gửi metrics + nhận về các lệnh pending trong cùng 1 request.
 exports.heartbeat = async (req, res) => {
   try {
     const { agentId, hostname, ip, cpu_percent, memory_percent, iptables_rules, network_interfaces } = req.body;
@@ -10,55 +13,80 @@ exports.heartbeat = async (req, res) => {
 
     const agent = await prisma.agent.upsert({
       where: { id },
-      update: { 
-        lastHeartbeat: new Date(), 
-        status: 'online', 
-        cpuPercent: cpu_percent, 
+      update: {
+        lastHeartbeat: new Date(),
+        status: 'online',
+        cpuPercent: cpu_percent,
         memPercent: memory_percent,
         ...(iptables_rules !== undefined ? { iptablesRules: iptables_rules } : {}),
-        ...(network_interfaces !== undefined ? { interfaces: JSON.stringify(network_interfaces) } : {})
+        ...(network_interfaces !== undefined ? { interfaces: JSON.stringify(network_interfaces) } : {}),
       },
-      create: { 
-        id, 
-        hostname: hostname || 'Unknown-Host', 
-        ip: ip || req.ip || '127.0.0.1', 
-        cpuPercent: cpu_percent, 
+      create: {
+        id,
+        hostname: hostname || 'Unknown-Host',
+        ip: ip || req.ip || '127.0.0.1',
+        cpuPercent: cpu_percent,
         memPercent: memory_percent,
         iptablesRules: iptables_rules || null,
-        interfaces: network_interfaces ? JSON.stringify(network_interfaces) : null
-      }
+        interfaces: network_interfaces ? JSON.stringify(network_interfaces) : null,
+      },
     });
 
-    res.json({ status: 'ok', agentId: agent.id });
+    // Dequeue lệnh pending từ Redis queue, fetch từ DB, ký và trả về trong response
+    const commandIds = await dequeueCommands(id, 20);
+    let commands = [];
+
+    if (commandIds.length > 0) {
+      const fetched = await prisma.$transaction(async (tx) => {
+        const cmds = await tx.command.findMany({
+          where: { id: { in: commandIds }, status: 'pending' },
+          orderBy: { createdAt: 'asc' },
+        });
+        if (cmds.length > 0) {
+          await tx.command.updateMany({
+            where: { id: { in: cmds.map(c => c.id) } },
+            data: { status: 'in_progress' },
+          });
+        }
+        return cmds;
+      });
+
+      if (fetched.length > 0) {
+        await markInProgress(id, fetched.map(c => c.id));
+        commands = fetched.map(cmd => ({ ...cmd, signature: signCommand(cmd) }));
+        console.log(`[HB] Agent "${agent.hostname}" → ${commands.length} lệnh pending [SIGNED]`);
+      }
+    }
+
+    res.json({ status: 'ok', agentId: agent.id, commands });
   } catch (error) {
-    console.error('Heartbeat error:', error);
+    console.error('[HB] Heartbeat error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// GET /api/agents - Dashboard đọc danh sách agent
+// GET /api/agents
 exports.listAgents = async (req, res) => {
   try {
     const agents = await prisma.agent.findMany({ orderBy: { lastHeartbeat: 'desc' } });
     const now = new Date();
-    // Agent được coi là offline nếu không có heartbeat trong 2 phút gần nhất
-    const updatedAgents = agents.map(a => {
-      const isOnline = (now - new Date(a.lastHeartbeat)) < 120000;
-      return { ...a, status: isOnline ? 'online' : 'offline' };
-    });
-    res.json(updatedAgents);
+    const result = agents.map(a => ({
+      ...a,
+      status: (now - new Date(a.lastHeartbeat)) < 120_000 ? 'online' : 'offline',
+    }));
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// GET /api/stats - Dashboard đọc số liệu tổng quan (Số agent, số alert đang active, số event trong 24h)
+// GET /api/stats
 exports.getStats = async (req, res) => {
   try {
     const [totalAgents, activeAlerts, totalEvents] = await Promise.all([
       prisma.agent.count(),
       prisma.alert.count({ where: { resolved: false } }),
-      prisma.event.count()
+      prisma.event.count(),
     ]);
     res.json({ agents: totalAgents, alerts: activeAlerts, events: totalEvents });
   } catch (error) {

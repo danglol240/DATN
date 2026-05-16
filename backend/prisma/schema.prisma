@@ -50,6 +50,7 @@ model Command {
   action     String
   params     String    @default("{}")
   status     String    @default("pending")
+  result     String?
   createdAt  DateTime  @default(now())
   doneAt     DateTime?
   batchJobId String?
