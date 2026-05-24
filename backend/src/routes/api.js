@@ -6,18 +6,20 @@ const agentController = require('../controllers/agentController');
 const eventController = require('../controllers/eventController');
 const alertController = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
+const { agentAuth } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
+
+// Xác thực X-Agent-Key cho toàn bộ /api
+router.use(agentAuth);
 
 // AGENT
 router.post('/heartbeat', agentController.heartbeat);
 router.get('/agents', agentController.listAgents);
 router.get('/stats', agentController.getStats);
 
-// COMMANDS (Dashboard ra lenh -> Agent thuc thi iptables)
-// Agent nhan lenh qua heartbeat response, khong con endpoint poll rieng.
+// COMMANDS — Dashboard gửi lệnh; agent nhận qua HTTPS push, kết quả về qua Redis.
 router.post('/agents/:agentId/commands', commandController.sendCommand);
-router.patch('/commands/:id/done', commandController.markDone);
 router.get('/agents/:agentId/commands/history', commandController.commandHistory);
 router.post('/commands/batch', commandController.sendBatchCommand);
 

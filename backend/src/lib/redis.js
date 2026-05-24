@@ -2,10 +2,9 @@
  * Redis Client
  *
  * Vai trò của Redis trong hệ thống:
- *   1. LIST  cmd:pending:{agentId}    → Queue lệnh chờ, agent dequeue khi heartbeat
- *   2. SET   cmd:inprogress:{agentId} → Track lệnh đang chạy (phát hiện stuck commands)
- *
- * Không còn socket mapping (agent dùng HTTP polling, không giữ WS liên tục).
+ *   1. LIST  cmd:pending:{agentId}    → Fallback queue khi direct HTTPS push thất bại
+ *   2. SET   cmd:inprogress:{agentId} → Track lệnh đang chạy
+ *   3. LIST  results:queue            → Agent push kết quả; consumer BLPOP xử lý
  */
 
 const Redis = require('ioredis');
@@ -73,10 +72,15 @@ async function removeFromInProgress(agentId, commandId) {
   await redis.srem(KEYS.cmdInProgress(agentId), commandId);
 }
 
+// ─── Results Queue ────────────────────────────────────────────────────────────
+
+const RESULTS_KEY = 'results:queue';
+
 module.exports = {
   redis,
   KEYS,
   TTL,
+  RESULTS_KEY,
   enqueueCommand,
   dequeueCommands,
   markInProgress,

@@ -1,6 +1,5 @@
 psutil
 requests
 pyyaml
-python-socketio[client]
-websocket-client
+redis
 prometheus-client

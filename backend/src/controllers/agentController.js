@@ -5,47 +5,59 @@ const { signCommand } = require('../lib/security');
 const prisma = new PrismaClient();
 
 // POST /api/heartbeat
-// Agent gửi metrics + nhận về các lệnh pending trong cùng 1 request.
+// Agent gửi metrics + port → backend lưu agent.url để push lệnh trực tiếp.
+// Response trả về lệnh fallback (nếu direct push trước đó thất bại).
 exports.heartbeat = async (req, res) => {
   try {
-    const { agentId, hostname, ip, cpu_percent, memory_percent, iptables_rules, network_interfaces } = req.body;
+    const {
+      agentId, hostname, ip, port,
+      cpu_percent, memory_percent,
+      iptables_rules, network_interfaces,
+    } = req.body;
+
     const id = agentId || require('crypto').randomUUID();
+
+    // Xây dựng URL của agent server từ IP + port
+    const rawIp  = (ip || req.ip || '127.0.0.1').replace('::ffff:', '');
+    const agentUrl = port ? `https://${rawIp}:${port}` : null;
 
     const agent = await prisma.agent.upsert({
       where: { id },
       update: {
         lastHeartbeat: new Date(),
-        status: 'online',
-        cpuPercent: cpu_percent,
-        memPercent: memory_percent,
-        ...(iptables_rules !== undefined ? { iptablesRules: iptables_rules } : {}),
+        status:        'online',
+        cpuPercent:    cpu_percent,
+        memPercent:    memory_percent,
+        ...(agentUrl                  ? { url: agentUrl }                               : {}),
+        ...(iptables_rules  !== undefined ? { iptablesRules: iptables_rules }           : {}),
         ...(network_interfaces !== undefined ? { interfaces: JSON.stringify(network_interfaces) } : {}),
       },
       create: {
         id,
-        hostname: hostname || 'Unknown-Host',
-        ip: ip || req.ip || '127.0.0.1',
-        cpuPercent: cpu_percent,
-        memPercent: memory_percent,
-        iptablesRules: iptables_rules || null,
-        interfaces: network_interfaces ? JSON.stringify(network_interfaces) : null,
+        hostname:      hostname || 'Unknown-Host',
+        ip:            rawIp,
+        url:           agentUrl,
+        cpuPercent:    cpu_percent,
+        memPercent:    memory_percent,
+        iptablesRules: iptables_rules    || null,
+        interfaces:    network_interfaces ? JSON.stringify(network_interfaces) : null,
       },
     });
 
-    // Dequeue lệnh pending từ Redis queue, fetch từ DB, ký và trả về trong response
+    // Dequeue lệnh fallback từ Redis (chỉ có khi direct push thất bại trước đó)
     const commandIds = await dequeueCommands(id, 20);
     let commands = [];
 
     if (commandIds.length > 0) {
       const fetched = await prisma.$transaction(async (tx) => {
         const cmds = await tx.command.findMany({
-          where: { id: { in: commandIds }, status: 'pending' },
+          where:   { id: { in: commandIds }, status: 'pending' },
           orderBy: { createdAt: 'asc' },
         });
         if (cmds.length > 0) {
           await tx.command.updateMany({
             where: { id: { in: cmds.map(c => c.id) } },
-            data: { status: 'in_progress' },
+            data:  { status: 'in_progress' },
           });
         }
         return cmds;
@@ -54,7 +66,7 @@ exports.heartbeat = async (req, res) => {
       if (fetched.length > 0) {
         await markInProgress(id, fetched.map(c => c.id));
         commands = fetched.map(cmd => ({ ...cmd, signature: signCommand(cmd) }));
-        console.log(`[HB] Agent "${agent.hostname}" → ${commands.length} lệnh pending [SIGNED]`);
+        console.log(`[HB] Agent "${agent.hostname}" → ${commands.length} lệnh fallback [SIGNED]`);
       }
     }
 
@@ -66,7 +78,7 @@ exports.heartbeat = async (req, res) => {
 };
 
 // GET /api/agents
-exports.listAgents = async (req, res) => {
+exports.listAgents = async (_req, res) => {
   try {
     const agents = await prisma.agent.findMany({ orderBy: { lastHeartbeat: 'desc' } });
     const now = new Date();
@@ -81,7 +93,7 @@ exports.listAgents = async (req, res) => {
 };
 
 // GET /api/stats
-exports.getStats = async (req, res) => {
+exports.getStats = async (_req, res) => {
   try {
     const [totalAgents, activeAlerts, totalEvents] = await Promise.all([
       prisma.agent.count(),

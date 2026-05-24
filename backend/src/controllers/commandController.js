@@ -2,20 +2,46 @@
  * Command Controller
  *
  * Luồng gửi lệnh:
- *   Dashboard → POST /commands → DB.create + Redis RPUSH
- *   Agent nhận lệnh qua heartbeat response (POST /api/heartbeat → { commands:[...] })
+ *   Dashboard → POST /commands
+ *     → DB.create
+ *     → thử axios.post(agent.url/command)  [DIRECT HTTPS]
+ *     → nếu thất bại: Redis RPUSH cmd:pending  [FALLBACK POLLING]
  *
  * Luồng phản hồi:
- *   Agent → PATCH /commands/:id/done { status, result }
- *         → DB.update + Redis SREM + Socket.IO emit tới dashboard
+ *   Agent thực thi → Redis RPUSH results:queue
+ *   Backend ResultConsumer BLPOP → DB.update + Socket.IO emit dashboard
  */
 
+const https  = require('https');
+const fs     = require('fs');
+const axios  = require('axios');
 const { PrismaClient } = require('@prisma/client');
-const { enqueueCommand, removeFromInProgress } = require('../lib/redis');
+const { signCommand }  = require('../lib/security');
+const { enqueueCommand, markInProgress } = require('../lib/redis');
 
 const prisma = new PrismaClient();
 
-// ─── Internal: Tạo lệnh trong DB và queue vào Redis ───────────────────────────
+// Verify cert của agent qua CA chung — AGENT_CA_CERT trỏ đến ca-cert.pem
+// Nếu chưa cấu hình thì cảnh báo và fallback không verify (dev only).
+function _buildHttpsAgent() {
+  const caPath = process.env.AGENT_CA_CERT;
+  if (caPath && fs.existsSync(caPath)) {
+    return new https.Agent({
+      rejectUnauthorized: true,
+      ca: fs.readFileSync(caPath),
+    });
+  }
+  if (caPath) {
+    console.warn(`[CMD] AGENT_CA_CERT="${caPath}" không tồn tại — fallback không verify (dev only)`);
+  } else {
+    console.warn('[CMD] AGENT_CA_CERT chưa cấu hình — fallback không verify (dev only)');
+  }
+  return new https.Agent({ rejectUnauthorized: false });
+}
+
+const httpsAgent = _buildHttpsAgent();
+
+// ─── Internal: Tạo lệnh trong DB và dispatch ──────────────────────────────────
 
 async function _createAndDispatch(agentId, action, params, batchJobId = null) {
   const agent = await prisma.agent.findUnique({ where: { id: agentId } });
@@ -25,15 +51,37 @@ async function _createAndDispatch(agentId, action, params, batchJobId = null) {
     data: {
       agentId,
       action,
-      params: JSON.stringify(params || {}),
-      status: 'pending',
+      params:    JSON.stringify(params || {}),
+      status:    'pending',
       ...(batchJobId ? { batchJobId } : {}),
     },
   });
 
-  await enqueueCommand(agentId, command.id);
-  console.log(`[CMD] Queued "${action}" → ${agent.hostname} — agent nhận tại heartbeat tiếp theo`);
+  const signed = { ...command, signature: signCommand(command) };
 
+  // ── Thử push trực tiếp qua HTTPS ──────────────────────────────────────────
+  if (agent.url) {
+    try {
+      await axios.post(`${agent.url}/command`, signed, {
+        headers:    { 'X-Backend-Key': process.env.API_KEY },
+        timeout:    5000,
+        httpsAgent,
+      });
+      await prisma.command.update({
+        where: { id: command.id },
+        data:  { status: 'in_progress' },
+      });
+      await markInProgress(agentId, [command.id]);
+      console.log(`[CMD] "${action}" → ${agent.hostname} [DIRECT HTTPS ✓]`);
+      return { ok: true, command };
+    } catch (err) {
+      console.warn(`[CMD] Direct push thất bại (${agent.url}): ${err.message} — dùng fallback queue`);
+    }
+  }
+
+  // ── Fallback: Redis queue — agent nhận tại heartbeat tiếp theo ─────────────
+  await enqueueCommand(agentId, command.id);
+  console.log(`[CMD] "${action}" → ${agent.hostname} [FALLBACK QUEUE]`);
   return { ok: true, command };
 }
 
@@ -71,11 +119,11 @@ exports.sendBatchCommand = async (req, res) => {
     const batchJob = await prisma.batchJob.create({
       data: {
         action,
-        params: JSON.stringify(params || {}),
-        totalAgents: agentIds.length,
+        params:           JSON.stringify(params || {}),
+        totalAgents:      agentIds.length,
         successfulAgents: [],
-        failedAgents: [],
-        status: 'dispatching',
+        failedAgents:     [],
+        status:           'dispatching',
       },
     });
 
@@ -127,79 +175,6 @@ exports.sendBatchCommand = async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
-
-// ─── PATCH /api/commands/:id/done ─────────────────────────────────────────────
-
-exports.markDone = async (req, res) => {
-  try {
-    const { status = 'done', result = null } = req.body;
-
-    const command = await prisma.command.update({
-      where: { id: req.params.id },
-      data:  { status, result, doneAt: new Date() },
-    });
-
-    await removeFromInProgress(command.agentId, command.id);
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to('dashboards').emit('command_result', {
-        commandId:  command.id,
-        agentId:    command.agentId,
-        action:     command.action,
-        status:     command.status,
-        result:     command.result,
-        doneAt:     command.doneAt,
-        batchJobId: command.batchJobId ?? null,
-      });
-
-      if (command.batchJobId) {
-        await _updateBatchProgress(io, command);
-      }
-    }
-
-    console.log(`[CMD] ${command.action} → ${status.toUpperCase()} | ${result ?? '(no result)'}`);
-    res.json(command);
-  } catch (error) {
-    console.error('[CMD] markDone error:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-// ─── Internal: Cập nhật BatchJob progress ─────────────────────────────────────
-
-async function _updateBatchProgress(io, command) {
-  try {
-    const isDone = command.status === 'done';
-    const updatedJob = await prisma.batchJob.update({
-      where: { id: command.batchJobId },
-      data: isDone
-        ? { successfulAgents: { push: command.agentId } }
-        : { failedAgents:     { push: command.agentId } },
-    });
-
-    const totalDone = updatedJob.successfulAgents.length + updatedJob.failedAgents.length;
-    let finalStatus = updatedJob.status;
-
-    if (totalDone >= updatedJob.totalAgents) {
-      finalStatus = updatedJob.failedAgents.length > 0 ? 'partial_failure' : 'success';
-      await prisma.batchJob.update({
-        where: { id: command.batchJobId },
-        data:  { status: finalStatus },
-      });
-    }
-
-    io.to('dashboards').emit('batch_progress', {
-      batchJobId: command.batchJobId,
-      success:    updatedJob.successfulAgents.length,
-      failed:     updatedJob.failedAgents.length,
-      total:      updatedJob.totalAgents,
-      status:     finalStatus,
-    });
-  } catch (e) {
-    console.error('[CMD] BatchJob progress update error:', e.message);
-  }
-}
 
 // ─── GET /api/agents/:agentId/commands/history ────────────────────────────────
 

@@ -1,17 +1,37 @@
 const express = require('express');
 const cors    = require('cors');
 const http    = require('http');
+const https   = require('https');
+const fs      = require('fs');
 const { Server } = require('socket.io');
 const client  = require('prom-client');
 
 const apiRoutes = require('./src/routes/api');
 const { registerSocketEvents } = require('./src/socket/events');
+const { startResultConsumer }  = require('./src/lib/resultConsumer');
 
-const app    = express();
-const server = http.createServer(app);
+const app = express();
+
+// ─── HTTPS hoặc HTTP tuỳ theo SSL_CERT / SSL_KEY trong .env ──────────────────
+const SSL_CERT = process.env.SSL_CERT;
+const SSL_KEY  = process.env.SSL_KEY;
+
+let server;
+let protocol = 'http';
+
+if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
+  server   = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, app);
+  protocol = 'https';
+  console.log('[EDR Backend] TLS mode  → cert:', SSL_CERT);
+} else {
+  server = http.createServer(app);
+  if (SSL_CERT || SSL_KEY) {
+    console.warn('[EDR Backend] WARNING: SSL_CERT/SSL_KEY khai báo nhưng file không tồn tại — fallback HTTP');
+  }
+}
 
 // Socket.IO chỉ dùng để dashboard nhận broadcast real-time.
-// Agent không kết nối WebSocket — dùng HTTP heartbeat polling.
+// Agent không kết nối WebSocket — giao tiếp qua HTTPS + Redis.
 const io = new Server(server, {
   cors: { origin: process.env.CORS_ORIGIN || '*' },
 });
@@ -32,8 +52,15 @@ app.get('/metrics', async (_req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`[EDR Backend] Listening on :${PORT}`);
-  console.log('  HTTP       → Agent heartbeat + polling');
-  console.log('  Socket.IO  → Dashboard real-time broadcast');
-  console.log('  Redis      → Command queue');
+  console.log(`[EDR Backend] Listening on ${protocol}://0.0.0.0:${PORT}`);
+  console.log('  Auth          → X-Agent-Key (API_KEY)');
+  console.log('  Agent push    → HTTPS direct → agent:8443/command');
+  console.log('  Fallback      → Redis cmd:pending queue');
+  console.log('  Results       → Redis results:queue (BLPOP consumer)');
+  console.log('  Socket.IO     → Dashboard real-time broadcast');
+
+  // Khởi động consumer sau khi server sẵn sàng
+  startResultConsumer(io).catch(err =>
+    console.error('[ResultConsumer] Fatal error:', err.message)
+  );
 });

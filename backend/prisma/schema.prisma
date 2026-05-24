@@ -11,6 +11,7 @@ model Agent {
   id            String    @id @default(uuid())
   hostname      String
   ip            String
+  url           String?
   os            String?
   status        String    @default("online")
   lastHeartbeat DateTime  @default(now())
