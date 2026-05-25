@@ -1,5 +1,5 @@
 """
-EDR Agent — main.py
+main.py
 
 Kiến trúc: Backend PUSH qua HTTPS + Agent PUSH kết quả qua Redis.
 
