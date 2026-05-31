@@ -6,6 +6,7 @@ const agentController = require('../controllers/agentController');
 const eventController = require('../controllers/eventController');
 const alertController = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
+const { processResult }  = require('../lib/resultConsumer');
 const { agentAuth } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
@@ -18,10 +19,27 @@ router.post('/heartbeat', agentController.heartbeat);
 router.get('/agents', agentController.listAgents);
 router.get('/stats', agentController.getStats);
 
-// COMMANDS — Dashboard gửi lệnh; agent nhận qua HTTPS push, kết quả về qua Redis.
+// COMMANDS — Dashboard gửi lệnh; agent nhận qua HTTPS push, kết quả về qua HTTP hoặc Redis.
 router.post('/agents/:agentId/commands', commandController.sendCommand);
 router.get('/agents/:agentId/commands/history', commandController.commandHistory);
 router.post('/commands/batch', commandController.sendBatchCommand);
+
+// Kết quả lệnh từ agent gửi thẳng về qua HTTP (primary path).
+// Nếu agent không reach được backend, fallback RPUSH results:queue → BLPOP consumer xử lý.
+router.post('/commands/result', async (req, res) => {
+  const { commandId, agentId, status, result } = req.body;
+  if (!commandId || !agentId || !status)
+    return res.status(400).json({ error: 'commandId, agentId, status là bắt buộc' });
+
+  try {
+    const io = req.app.get('io');
+    await processResult(io, { commandId, agentId, status, result });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Result HTTP] Error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 // EVENTS (Agent gui len + Rule Engine tu dong)
 router.post('/events', async (req, res) => {

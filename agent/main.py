@@ -1,17 +1,20 @@
 """
 main.py
 
-Kiến trúc: Backend PUSH qua HTTPS + Agent PUSH kết quả qua Redis.
+Kiến trúc: HTTP-first cả 2 chiều, Redis là fallback.
 
-Luồng lệnh:
-  Backend → POST https://agent:8443/command { cmd + signature }
+Chiều đi (backend → agent):
+  Backend → POST https://agent:8443/command { cmd + signature }   [DIRECT]
           ← 202 Accepted  (ngay lập tức)
-  Agent verify HMAC → thực thi → redis.RPUSH results:queue { result }
-  Backend ResultConsumer BLPOP results:queue → cập nhật DB + broadcast dashboard
+  Nếu fail → Backend RPUSH cmd:pending:{agentId}
+  Agent heartbeat 30s → nhận lệnh fallback                        [FALLBACK]
 
-Fallback (khi agent offline / không reach được):
-  Backend RPUSH cmd:pending:{agentId}
-  Agent heartbeat mỗi 30s → nhận lệnh fallback → thực thi → Redis push kết quả
+Chiều về (agent → backend):
+  Agent → POST https://backend/api/commands/result { result }     [DIRECT]
+  Nếu fail → Agent RPUSH results:queue
+  Backend ResultConsumer BLPOP results:queue                       [FALLBACK]
+
+Cả hai chiều đều cập nhật DB + broadcast Socket.IO tới dashboard.
 
 Heartbeat:
   Mỗi 30s → POST /api/heartbeat { metrics, port }
@@ -95,17 +98,37 @@ def get_current_iptables():
         return f"Error: {e}"
 
 
-def push_result(redis_client, command_id, agent_id, status, result_msg):
-    """Đẩy kết quả thực thi vào Redis queue để backend consumer xử lý."""
+def push_result(redis_client, command_id, agent_id, status, result_msg,
+                backend_url=None, api_secret=None, ssl_verify=False):
+    """Thử HTTP POST lên backend trước; nếu fail thì RPUSH Redis làm fallback."""
+    payload = {
+        'commandId': command_id,
+        'agentId':   agent_id,
+        'status':    status,
+        'result':    result_msg,
+    }
+
+    if backend_url and api_secret:
+        try:
+            r = requests.post(
+                f"{backend_url}/api/commands/result",
+                json=payload,
+                headers={"X-Agent-Key": api_secret},
+                timeout=5,
+                verify=ssl_verify,
+            )
+            if r.status_code == 200:
+                logging.info(f"[Result] HTTP ✓ → {status.upper()} | {result_msg}")
+                return
+            logging.warning(f"[Result] HTTP {r.status_code} — fallback Redis")
+        except Exception as e:
+            logging.warning(f"[Result] HTTP thất bại — fallback Redis: {e}")
+
     try:
-        redis_client.rpush(RESULTS_KEY, json.dumps({
-            'commandId': command_id,
-            'agentId':   agent_id,
-            'status':    status,
-            'result':    result_msg,
-        }))
+        redis_client.rpush(RESULTS_KEY, json.dumps(payload))
+        logging.info(f"[Result] Redis ✓ → {status.upper()} | {result_msg}")
     except Exception as e:
-        logging.error(f"[Redis] Không push được kết quả: {e}")
+        logging.error(f"[Result] Cả HTTP lẫn Redis đều thất bại: {e}")
 
 
 # ─── Command Executor ─────────────────────────────────────────────────────────
@@ -119,7 +142,8 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
     except SecurityError as e:
         logging.error(f"[Security] REJECT command {cmd_id}: {e}")
         push_result(redis_client, cmd_id, agent_id,
-                    'failed', f"SECURITY: Signature không hợp lệ — {e}")
+                    'failed', f"SECURITY: Signature không hợp lệ — {e}",
+                    backend_url, api_secret, ssl_verify)
         return
 
     action = command.get('action')
@@ -238,8 +262,8 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
         logging.error(f"[CMD] Lỗi thực thi: {e}")
 
     status_val = "done" if success else "failed"
-    push_result(redis_client, cmd_id, agent_id, status_val, result_msg)
-    logging.info(f"[CMD] {action} → {status_val.upper()} | {result_msg}")
+    push_result(redis_client, cmd_id, agent_id, status_val, result_msg,
+                backend_url, api_secret, ssl_verify)
 
 
 # ─── Heartbeat — Metrics + Fallback Commands ──────────────────────────────────
