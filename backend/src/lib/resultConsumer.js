@@ -1,11 +1,11 @@
 /**
  * Result Consumer
  *
- * BLPOP results:queue — xử lý kết quả lệnh từ agent:
- *   1. Cập nhật Command trong PostgreSQL (status, result, doneAt)
- *   2. Xoá khỏi Redis in-progress set
- *   3. Socket.IO broadcast 'command_result' tới dashboard
- *   4. Cập nhật BatchJob progress nếu có
+ * Hai đường nhận kết quả từ agent:
+ *   1. HTTP   — Agent POST /api/commands/result trực tiếp (primary)
+ *   2. Redis  — Agent RPUSH results:queue, BLPOP consumer xử lý (fallback)
+ *
+ * Cả hai đường đều gọi processResult() — logic xử lý dùng chung.
  *
  * Dùng một Redis connection riêng (blocking) để không ảnh hưởng connection chính.
  */
@@ -49,6 +49,38 @@ async function _updateBatchProgress(io, command) {
   }
 }
 
+// ─── Shared result processor (HTTP path + Redis path đều dùng) ───────────────
+
+async function processResult(io, { commandId, agentId, status, result }) {
+  const command = await prisma.command.update({
+    where: { id: commandId },
+    data:  { status, result: result ?? null, doneAt: new Date() },
+  });
+
+  await removeFromInProgress(agentId, commandId);
+
+  if (io) {
+    io.to('dashboards').emit('command_result', {
+      commandId:  command.id,
+      agentId:    command.agentId,
+      action:     command.action,
+      status:     command.status,
+      result:     command.result,
+      doneAt:     command.doneAt,
+      batchJobId: command.batchJobId ?? null,
+    });
+
+    if (command.batchJobId) {
+      await _updateBatchProgress(io, command);
+    }
+  }
+
+  console.log(`[Result] ${command.action} → ${status.toUpperCase()} | ${result ?? ''}`);
+  return command;
+}
+
+// ─── Redis fallback consumer (BLPOP) ─────────────────────────────────────────
+
 async function startResultConsumer(io) {
   // Connection riêng cho BLPOP — maxRetriesPerRequest: null bắt buộc cho blocking commands
   const consumer = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
@@ -69,32 +101,7 @@ async function startResultConsumer(io) {
       if (!item) continue;
 
       const [, raw] = item;
-      const { commandId, agentId, status, result } = JSON.parse(raw);
-
-      const command = await prisma.command.update({
-        where: { id: commandId },
-        data:  { status, result: result ?? null, doneAt: new Date() },
-      });
-
-      await removeFromInProgress(agentId, commandId);
-
-      if (io) {
-        io.to('dashboards').emit('command_result', {
-          commandId:  command.id,
-          agentId:    command.agentId,
-          action:     command.action,
-          status:     command.status,
-          result:     command.result,
-          doneAt:     command.doneAt,
-          batchJobId: command.batchJobId ?? null,
-        });
-
-        if (command.batchJobId) {
-          await _updateBatchProgress(io, command);
-        }
-      }
-
-      console.log(`[Result] ${command.action} → ${status.toUpperCase()} | ${result ?? ''}`);
+      await processResult(io, JSON.parse(raw));
     } catch (err) {
       console.error('[ResultConsumer] Error:', err.message);
       // Back off 1s trước khi thử lại để tránh tight loop khi DB/Redis lỗi
@@ -103,4 +110,4 @@ async function startResultConsumer(io) {
   }
 }
 
-module.exports = { startResultConsumer };
+module.exports = { startResultConsumer, processResult };

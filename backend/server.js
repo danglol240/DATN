@@ -22,11 +22,11 @@ let protocol = 'http';
 if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
   server   = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, app);
   protocol = 'https';
-  console.log('[EDR Backend] TLS mode  → cert:', SSL_CERT);
+  console.log('TLS mode  → cert:', SSL_CERT);
 } else {
   server = http.createServer(app);
   if (SSL_CERT || SSL_KEY) {
-    console.warn('[EDR Backend] WARNING: SSL_CERT/SSL_KEY khai báo nhưng file không tồn tại — fallback HTTP');
+    console.warn('WARNING: SSL_CERT/SSL_KEY khai báo nhưng file không tồn tại — fallback HTTP');
   }
 }
 
