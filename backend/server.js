@@ -6,7 +6,8 @@ const fs      = require('fs');
 const { Server } = require('socket.io');
 const client  = require('prom-client');
 
-const apiRoutes = require('./src/routes/api');
+const apiRoutes  = require('./src/routes/api');
+const authRoutes = require('./src/routes/auth');
 const { registerSocketEvents } = require('./src/socket/events');
 const { startResultConsumer }  = require('./src/lib/resultConsumer');
 
@@ -41,6 +42,7 @@ app.set('io', io);
 
 app.use(cors());
 app.use(express.json());
+app.use('/auth', authRoutes);
 app.use('/api', apiRoutes);
 app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 

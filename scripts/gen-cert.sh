@@ -33,7 +33,7 @@ echo ""
 
 # ─── 1. CA ────────────────────────────────────────────────────────────────────
 # CA key + cert dùng chung, chỉ sinh 1 lần.
-# Ai có ca-key.pem có thể ký cert mới — giữ bí mật, không deploy lên server.
+# Ai có ca-key.pem có thể ký cert mới — giữ bí mật.
 
 CA_KEY="$BACKEND_CERTS/ca-key.pem"
 CA_CERT="$BACKEND_CERTS/ca-cert.pem"
@@ -48,7 +48,7 @@ else
     -key  "$CA_KEY" \
     -out  "$CA_CERT" \
     -subj "/CN=EDR-CA/O=EDR/C=VN"
-  echo "[gen-cert] CA cert → $CA_CERT (hạn 10 năm)"
+  echo "[gen-cert] CA cert → $CA_CERT"
 fi
 echo ""
 
@@ -113,7 +113,7 @@ rm -rf "$TMP"
 # ─── Hướng dẫn ────────────────────────────────────────────────────────────────
 echo ""
 echo "════════════════════════════════════════════════════"
-echo " XONG. Cấu hình như sau:"
+echo " Cấu hình như sau:"
 echo "════════════════════════════════════════════════════"
 echo ""
 echo " backend/.env:"
