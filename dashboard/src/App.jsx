@@ -3,34 +3,47 @@ import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
 import Events from './pages/Events';
 import Alerts from './pages/Alerts';
+import Settings from './pages/Settings';
+import Login from './pages/Login';
 import ToastContainer, { useToast } from './components/Toast';
 import { useSocket } from './hooks/useSocket';
-import { LayoutDashboard, Server, Activity, ShieldAlert, Menu, Wifi, WifiOff } from 'lucide-react';
+import { useAuth } from './hooks/useAuth';
+import {
+  LayoutDashboard, Server, Activity, ShieldAlert,
+  Menu, Wifi, WifiOff, LogOut, User, Settings as SettingsIcon,
+} from 'lucide-react';
 
 function App() {
   const [page, setPage] = useState('dashboard');
   const [isSidebarOpen, setSidebarOpen] = useState(true);
   const { connected, on } = useSocket();
   const { toasts, addToast, removeToast } = useToast();
+  const { isAuthenticated, awaiting2FA, user, login, verify2FA, logout } = useAuth();
 
-  // Global socket listeners — alert + agent status toasts
   useEffect(() => {
     const offAlert = on('alert_notification', ({ alert }) => {
       const host = alert?.agentHostname ? `[${alert.agentHostname}] ` : '';
       const type = alert?.severity === 'Critical' ? 'error' : 'warning';
       addToast(`🚨 ${host}${alert?.ruleName}: ${alert?.description}`, type);
     });
-
-    const offConn = on('agent_connected', ({ agentId }) => {
-      addToast(`Agent connected`, 'success', 3000);
-    });
-
-    const offDisconn = on('agent_disconnected', ({ agentId }) => {
-      addToast(`Agent disconnected`, 'warning', 3000);
-    });
-
+    const offConn    = on('agent_connected',    () => addToast('Agent connected', 'success', 3000));
+    const offDisconn = on('agent_disconnected', () => addToast('Agent disconnected', 'warning', 3000));
     return () => { offAlert(); offConn(); offDisconn(); };
   }, [on, addToast]);
+
+  // Chưa đăng nhập hoặc đang chờ bước 2FA
+  if (!isAuthenticated) {
+    return (
+      <>
+        <Login
+          onLogin={login}
+          onVerify2FA={verify2FA}
+          awaiting2FA={awaiting2FA}
+        />
+        <ToastContainer toasts={toasts} removeToast={removeToast} />
+      </>
+    );
+  }
 
   const navItems = [
     { id: 'dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -74,7 +87,39 @@ function App() {
           ))}
         </div>
 
-        {/* Real-time connection status indicator */}
+        {/* Settings nav */}
+        <div className="px-4 pb-2">
+          <button
+            onClick={() => setPage('settings')}
+            title={!isSidebarOpen ? 'Settings' : ''}
+            className={`w-full flex items-center gap-3 p-3 rounded-lg text-sm font-medium transition
+              ${page === 'settings'
+                ? 'bg-[#25262E] text-white border border-[#3A3B45]'
+                : 'text-gray-400 hover:text-white hover:bg-[#25262E]/50'}
+              ${!isSidebarOpen ? 'justify-center border border-transparent' : ''}`}
+          >
+            <SettingsIcon size={20} className="shrink-0" />
+            {isSidebarOpen && <span className="truncate">Settings</span>}
+          </button>
+        </div>
+
+        {/* User info + logout */}
+        {isSidebarOpen ? (
+          <div className="px-4 py-3 border-t border-[#2E2F3A] flex items-center gap-2">
+            <User size={14} className="text-gray-400 shrink-0" />
+            <span className="text-xs text-gray-400 truncate flex-1">{user?.username}</span>
+            <span className="text-xs text-gray-600 bg-[#25262E] px-1.5 py-0.5 rounded">{user?.role}</span>
+            <button onClick={logout} title="Đăng xuất" className="text-gray-500 hover:text-red-400 transition ml-1">
+              <LogOut size={14} />
+            </button>
+          </div>
+        ) : (
+          <button onClick={logout} title="Đăng xuất" className="mx-auto my-2 text-gray-500 hover:text-red-400 transition">
+            <LogOut size={16} />
+          </button>
+        )}
+
+        {/* Connection status */}
         <div className={`px-4 py-3 border-t border-[#2E2F3A] flex items-center gap-2 text-xs ${!isSidebarOpen ? 'justify-center' : ''}`}>
           {connected ? (
             <>
@@ -96,6 +141,7 @@ function App() {
           {page === 'agents'    && <Agents />}
           {page === 'events'    && <Events />}
           {page === 'alerts'    && <Alerts />}
+          {page === 'settings'  && <Settings user={user} />}
         </div>
       </main>
 

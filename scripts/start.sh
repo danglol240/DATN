@@ -30,7 +30,7 @@ echo "$(date) Starting services..."
   echo "$(date) Starting agent..." >> "$LOG_DIR/agent.log"
 
   if [ -x "venv/bin/python3" ]; then
-    .venv/bin/python3 -m pip install -r requirements.txt >/dev/null 2>&1 || true
+    venv/bin/python3 -m pip install -r requirements.txt >/dev/null 2>&1 || true
     nohup venv/bin/python3 main.py >> "$LOG_DIR/agent.log" 2>&1 &
   else
     nohup python3 main.py >> "$LOG_DIR/agent.log" 2>&1 &
@@ -58,12 +58,20 @@ echo "$(date) Starting services..."
 
 # MONITOR STACK (Prometheus + Grafana + Redis Exporter)
 (
-  if command -v docker >/dev/null 2>&1; then
-    cd "$PROJECT/monitor" || exit 1
-    echo "$(date) Starting monitor stack..." >> "$LOG_DIR/monitor.log"
-    docker compose up -d >> "$LOG_DIR/monitor.log" 2>&1
+  if docker compose version >/dev/null 2>&1; then
+    COMPOSE_CMD="docker compose"
+  elif command -v docker-compose >/dev/null 2>&1; then
+    COMPOSE_CMD="docker-compose"
   else
-    echo "$(date) [SKIP] docker not found; skipping monitor stack" >> "$LOG_DIR/monitor.log"
+    COMPOSE_CMD=""
+  fi
+
+  if [ -n "$COMPOSE_CMD" ]; then
+    cd "$PROJECT/monitor" || exit 1
+    echo "$(date) Starting monitor stack (using $COMPOSE_CMD)..." >> "$LOG_DIR/monitor.log"
+    $COMPOSE_CMD up -d --force-recreate >> "$LOG_DIR/monitor.log" 2>&1
+  else
+    echo "$(date) [SKIP] docker compose not found; skipping monitor stack" >> "$LOG_DIR/monitor.log"
   fi
 )
 

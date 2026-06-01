@@ -7,42 +7,15 @@ const eventController = require('../controllers/eventController');
 const alertController = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
 const { processResult }  = require('../lib/resultConsumer');
-const { agentAuth } = require('../middleware/auth');
+const { agentAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
 
-// Xác thực X-Agent-Key cho toàn bộ /api
-router.use(agentAuth);
+// ─── Agent routes — xác thực bằng X-Agent-Key ────────────────────────────────
 
-// AGENT
-router.post('/heartbeat', agentController.heartbeat);
-router.get('/agents', agentController.listAgents);
-router.get('/stats', agentController.getStats);
+router.post('/heartbeat', agentAuth, agentController.heartbeat);
 
-// COMMANDS — Dashboard gửi lệnh; agent nhận qua HTTPS push, kết quả về qua HTTP hoặc Redis.
-router.post('/agents/:agentId/commands', commandController.sendCommand);
-router.get('/agents/:agentId/commands/history', commandController.commandHistory);
-router.post('/commands/batch', commandController.sendBatchCommand);
-
-// Kết quả lệnh từ agent gửi thẳng về qua HTTP (primary path).
-// Nếu agent không reach được backend, fallback RPUSH results:queue → BLPOP consumer xử lý.
-router.post('/commands/result', async (req, res) => {
-  const { commandId, agentId, status, result } = req.body;
-  if (!commandId || !agentId || !status)
-    return res.status(400).json({ error: 'commandId, agentId, status là bắt buộc' });
-
-  try {
-    const io = req.app.get('io');
-    await processResult(io, { commandId, agentId, status, result });
-    res.json({ ok: true });
-  } catch (err) {
-    console.error('[Result HTTP] Error:', err.message);
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
-
-// EVENTS (Agent gui len + Rule Engine tu dong)
-router.post('/events', async (req, res) => {
+router.post('/events', agentAuth, async (req, res) => {
   try {
     const { agentId, type, data } = req.body;
     if (!agentId || !type)
@@ -61,7 +34,6 @@ router.post('/events', async (req, res) => {
       const createdAlert = await prisma.alert.create({ data: alert });
       console.log(`[ALERT][${alert.severity}] ${alert.ruleName} - Agent: ${agentId}`);
 
-      // Broadcast to all connected dashboard clients in real-time
       if (io) {
         io.to('dashboards').emit('alert_notification', {
           alert: { ...createdAlert, agentHostname: agent?.hostname },
@@ -76,16 +48,41 @@ router.post('/events', async (req, res) => {
   }
 });
 
-router.get('/events', eventController.listEvents);
+// Kết quả lệnh từ agent gửi thẳng về qua HTTP (primary path).
+// Nếu agent không reach được backend, fallback RPUSH results:queue → BLPOP consumer xử lý.
+router.post('/commands/result', agentAuth, async (req, res) => {
+  const { commandId, agentId, status, result } = req.body;
+  if (!commandId || !agentId || !status)
+    return res.status(400).json({ error: 'commandId, agentId, status là bắt buộc' });
 
-// ALERTS
-router.get('/alerts', alertController.listAlerts);
-router.patch('/alerts/:id/resolve', alertController.resolveAlert);
+  try {
+    const io = req.app.get('io');
+    await processResult(io, { commandId, agentId, status, result });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[Result HTTP] Error:', err.message);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
+// ─── Dashboard routes — xác thực bằng JWT Bearer token ───────────────────────
+
+router.get('/agents', dashboardAuth, agentController.listAgents);
+router.get('/stats', dashboardAuth, agentController.getStats);
+
+router.post('/agents/:agentId/commands', dashboardAuth, requireAdmin, commandController.sendCommand);
+router.get('/agents/:agentId/commands/history', dashboardAuth, commandController.commandHistory);
+router.post('/commands/batch', dashboardAuth, requireAdmin, commandController.sendBatchCommand);
+
+router.get('/events', dashboardAuth, eventController.listEvents);
+
+router.get('/alerts', dashboardAuth, alertController.listAlerts);
+router.patch('/alerts/:id/resolve', dashboardAuth, alertController.resolveAlert);
 
 // RULES CONFIG
 const { RULES } = require('../services/ruleEngine');
-router.get('/agents/:agentId/rules', async (req, res) => {
+
+router.get('/agents/:agentId/rules', dashboardAuth, async (req, res) => {
   const agent = await prisma.agent.findUnique({ where: { id: req.params.agentId } });
   if (!agent) return res.status(404).json({ error: 'Agent not found' });
   let config = {};
@@ -99,7 +96,7 @@ router.get('/agents/:agentId/rules', async (req, res) => {
   res.json({ rules: enrichedRules });
 });
 
-router.post('/agents/:agentId/rules', async (req, res) => {
+router.post('/agents/:agentId/rules', dashboardAuth, requireAdmin, async (req, res) => {
   const { config } = req.body;
   await prisma.agent.update({
     where: { id: req.params.agentId },

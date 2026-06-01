@@ -1,5 +1,5 @@
 """
-main.py
+EDR Agent — main.py
 
 Kiến trúc: HTTP-first cả 2 chiều, Redis là fallback.
 
@@ -342,7 +342,7 @@ def main():
 
     if not api_secret or len(api_secret) < 32:
         logging.error("─" * 60)
-        logging.error("   CẢNH BÁO: api_key chưa được cấu hình trong config.yaml!")
+        logging.error("api_key chưa được cấu hình trong config.yaml!")
         logging.error("─" * 60)
         time.sleep(5)
 
