@@ -8,7 +8,7 @@ const { PrismaClient } = require('@prisma/client');
 const { dashboardAuth } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
-const JWT_SECRET   = process.env.JWT_SECRET || 'danghoang2004';
+const JWT_SECRET   = process.env.JWT_SECRET; // bắt buộc — middleware/auth.js đã kiểm tra khi khởi động
 const JWT_EXPIRES  = '24h';
 const TEMP_EXPIRES = '5m'; // token tạm trong khi chờ nhập mã 2FA
 const APP_NAME     = process.env.APP_NAME || 'FinalProject EDR';

@@ -2,14 +2,14 @@ backend_url: "https://localhost:3000"
 heartbeat_interval: 30
 api_key: "cafd410948f5033b70143a795ac385b8d8a3d1d89fdc4bf443091dd9449c32ed"
 
-# ssl_verify cho requests tới backend
-# false → bỏ qua verify (self-signed) | true → CA hệ thống | path → cert file
+# enrollment_code KHÔNG còn lưu trong config — luôn nhập thủ công khi chạy lần đầu
+
+# ssl_verify cho requests tới backend (path tới ca-cert.pem sau khi enroll)
 ssl_verify: "./certs/ca-cert.pem"
 
 # Agent HTTPS server — backend push commands trực tiếp tới đây
 listen_port: 8443
 agent_cert: "./certs/agent-cert.pem"
 agent_key:  "./certs/agent-key.pem"
-
-# Redis — agent push kết quả trực tiếp vào queue (không qua HTTP)
-redis_url: "redis://localhost:6379"
+# ca_cert: dùng để verify client cert của backend (mTLS server-side)
+ca_cert: "./certs/ca-cert.pem"

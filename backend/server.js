@@ -9,7 +9,6 @@ const client  = require('prom-client');
 const apiRoutes  = require('./src/routes/api');
 const authRoutes = require('./src/routes/auth');
 const { registerSocketEvents } = require('./src/socket/events');
-const { startResultConsumer }  = require('./src/lib/resultConsumer');
 
 const app = express();
 
@@ -56,13 +55,7 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`[EDR Backend] Listening on ${protocol}://0.0.0.0:${PORT}`);
   console.log('  Auth          → X-Agent-Key (API_KEY)');
-  console.log('  Agent push    → HTTPS direct → agent:8443/command');
-  console.log('  Fallback      → Redis cmd:pending queue');
-  console.log('  Results       → Redis results:queue (BLPOP consumer)');
+  console.log('  Agent push    → HTTPS direct mTLS → agent:8443/command');
+  console.log('  Results       → POST /api/commands/result (HTTP direct)');
   console.log('  Socket.IO     → Dashboard real-time broadcast');
-
-  // Khởi động consumer sau khi server sẵn sàng
-  startResultConsumer(io).catch(err =>
-    console.error('[ResultConsumer] Fatal error:', err.message)
-  );
 });

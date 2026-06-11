@@ -17,26 +17,42 @@ const fs     = require('fs');
 const axios  = require('axios');
 const { PrismaClient } = require('@prisma/client');
 const { signCommand }  = require('../lib/security');
-const { enqueueCommand, markInProgress } = require('../lib/redis');
 
 const prisma = new PrismaClient();
 
-// Verify cert của agent qua CA chung — AGENT_CA_CERT trỏ đến ca-cert.pem
-// Nếu chưa cấu hình thì cảnh báo và fallback không verify (dev only).
+// mTLS: backend verify cert của agent qua CA, đồng thời trình backend cert cho agent verify.
+// AGENT_CA_CERT → ca-cert.pem  |  BACKEND_CERT + BACKEND_KEY → backend-cert/key.pem
 function _buildHttpsAgent() {
-  const caPath = process.env.AGENT_CA_CERT;
-  if (caPath && fs.existsSync(caPath)) {
-    return new https.Agent({
-      rejectUnauthorized: true,
-      ca: fs.readFileSync(caPath),
-    });
+  const caPath   = process.env.AGENT_CA_CERT;
+  const certPath = process.env.BACKEND_CERT;
+  const keyPath  = process.env.BACKEND_KEY;
+
+  const caExists   = caPath   && fs.existsSync(caPath);
+  const certExists = certPath && fs.existsSync(certPath);
+  const keyExists  = keyPath  && fs.existsSync(keyPath);
+
+  if (!caExists) {
+    console.warn(caPath
+      ? `[CMD] AGENT_CA_CERT="${caPath}" không tồn tại — fallback không verify (dev only)`
+      : '[CMD] AGENT_CA_CERT chưa cấu hình — fallback không verify (dev only)');
+    return new https.Agent({ rejectUnauthorized: false });
   }
-  if (caPath) {
-    console.warn(`[CMD] AGENT_CA_CERT="${caPath}" không tồn tại — fallback không verify (dev only)`);
+
+  const agentOptions = {
+    rejectUnauthorized: true,
+    ca: fs.readFileSync(caPath),
+  };
+
+  // Trình backend client cert để agent server verify (mTLS)
+  if (certExists && keyExists) {
+    agentOptions.cert = fs.readFileSync(certPath);
+    agentOptions.key  = fs.readFileSync(keyPath);
+    console.log('[CMD] mTLS enabled — backend trình client cert tới agent');
   } else {
-    console.warn('[CMD] AGENT_CA_CERT chưa cấu hình — fallback không verify (dev only)');
+    console.warn('[CMD] BACKEND_CERT/KEY chưa cấu hình — bỏ qua mTLS client cert');
   }
-  return new https.Agent({ rejectUnauthorized: false });
+
+  return new https.Agent(agentOptions);
 }
 
 const httpsAgent = _buildHttpsAgent();
@@ -57,31 +73,20 @@ async function _createAndDispatch(agentId, action, params, batchJobId = null) {
     },
   });
 
+  if (!agent.url)
+    return { ok: false, error: `Agent ${agent.hostname} chưa có URL — chưa heartbeat lần nào`, agentId };
+
   const signed = { ...command, signature: signCommand(command) };
 
-  // ── Thử push trực tiếp qua HTTPS ──────────────────────────────────────────
-  if (agent.url) {
-    try {
-      await axios.post(`${agent.url}/command`, signed, {
-        headers:    { 'X-Backend-Key': process.env.API_KEY },
-        timeout:    5000,
-        httpsAgent,
-      });
-      await prisma.command.update({
-        where: { id: command.id },
-        data:  { status: 'in_progress' },
-      });
-      await markInProgress(agentId, [command.id]);
-      console.log(`[CMD] "${action}" → ${agent.hostname} [DIRECT HTTPS ✓]`);
-      return { ok: true, command };
-    } catch (err) {
-      console.warn(`[CMD] Direct push thất bại (${agent.url}): ${err.message} — dùng fallback queue`);
-    }
-  }
+  // Không cần X-Backend-Key — mTLS đã xác thực danh tính tại TLS handshake
+  await axios.post(`${agent.url}/command`, signed, { timeout: 5000, httpsAgent });
 
-  // ── Fallback: Redis queue — agent nhận tại heartbeat tiếp theo ─────────────
-  await enqueueCommand(agentId, command.id);
-  console.log(`[CMD] "${action}" → ${agent.hostname} [FALLBACK QUEUE]`);
+  await prisma.command.update({
+    where: { id: command.id },
+    data:  { status: 'in_progress' },
+  });
+
+  console.log(`[CMD] "${action}" → ${agent.hostname} [DIRECT HTTPS ✓]`);
   return { ok: true, command };
 }
 
