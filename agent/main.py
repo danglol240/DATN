@@ -21,10 +21,10 @@ Heartbeat:
            ← { status, agentId, commands: [...] }   ← lệnh fallback nếu có
 """
 
+import sys
 import time
 import yaml
 import requests
-import redis as redis_lib
 import uuid
 import socket
 import logging
@@ -38,10 +38,9 @@ from modules.responder      import (block_ip, unblock_ip, add_custom_rule,
 from modules.metric_exporter import run_metrics
 from modules.security       import verify_and_extract_command, SecurityError
 from modules.agent_server   import run_agent_server
+from modules.enrollment     import is_enrolled, enroll
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
-
-RESULTS_KEY = 'results:queue'
 
 
 # ─── Config & Identity ────────────────────────────────────────────────────────
@@ -76,7 +75,7 @@ def get_agent_id():
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def send_event(backend_url, agent_id, etype, data, api_secret, ssl_verify=False):
+def send_event(backend_url, agent_id, etype, data, api_secret, ssl_verify=False, client_cert=None):
     try:
         requests.post(
             f"{backend_url}/api/events",
@@ -84,6 +83,7 @@ def send_event(backend_url, agent_id, etype, data, api_secret, ssl_verify=False)
             headers={"X-Agent-Key": api_secret},
             timeout=5,
             verify=ssl_verify,
+            cert=client_cert,
         )
     except Exception:
         pass
@@ -98,53 +98,50 @@ def get_current_iptables():
         return f"Error: {e}"
 
 
-def push_result(redis_client, command_id, agent_id, status, result_msg,
-                backend_url=None, api_secret=None, ssl_verify=False):
-    """Thử HTTP POST lên backend trước; nếu fail thì RPUSH Redis làm fallback."""
+def push_result(command_id, agent_id, status, result_msg,
+                backend_url, api_secret, ssl_verify=False, client_cert=None):
     payload = {
         'commandId': command_id,
         'agentId':   agent_id,
         'status':    status,
         'result':    result_msg,
     }
-
-    if backend_url and api_secret:
-        try:
-            r = requests.post(
-                f"{backend_url}/api/commands/result",
-                json=payload,
-                headers={"X-Agent-Key": api_secret},
-                timeout=5,
-                verify=ssl_verify,
-            )
-            if r.status_code == 200:
-                logging.info(f"[Result] HTTP ✓ → {status.upper()} | {result_msg}")
-                return
-            logging.warning(f"[Result] HTTP {r.status_code} — fallback Redis")
-        except Exception as e:
-            logging.warning(f"[Result] HTTP thất bại — fallback Redis: {e}")
-
     try:
-        redis_client.rpush(RESULTS_KEY, json.dumps(payload))
-        logging.info(f"[Result] Redis ✓ → {status.upper()} | {result_msg}")
+        r = requests.post(
+            f"{backend_url}/api/commands/result",
+            json=payload,
+            headers={"X-Agent-Key": api_secret},
+            timeout=5,
+            verify=ssl_verify,
+            cert=client_cert,
+        )
+        if r.status_code == 200:
+            logging.info(f"[Result] ✓ → {status.upper()} | {result_msg}")
+        else:
+            logging.error(f"[Result] HTTP {r.status_code} — kết quả không gửi được")
     except Exception as e:
-        logging.error(f"[Result] Cả HTTP lẫn Redis đều thất bại: {e}")
+        logging.error(f"[Result] Thất bại: {e}")
 
 
 # ─── Command Executor ─────────────────────────────────────────────────────────
 
 def execute_command_logic(backend_url, agent_id, cmd, api_secret,
-                          redis_client, ssl_verify=False):
+                          ssl_verify=False, client_cert=None, trusted=False):
     cmd_id = cmd.get('id')
 
-    try:
-        command = verify_and_extract_command(cmd, api_secret)
-    except SecurityError as e:
-        logging.error(f"[Security] REJECT command {cmd_id}: {e}")
-        push_result(redis_client, cmd_id, agent_id,
-                    'failed', f"SECURITY: Signature không hợp lệ — {e}",
-                    backend_url, api_secret, ssl_verify)
-        return
+    if trusted:
+        # mTLS path: danh tính backend đã được xác thực tại TLS handshake — bỏ qua HMAC
+        command = cmd
+    else:
+        # Redis fallback path: không có mTLS → bắt buộc verify HMAC-SHA256
+        try:
+            command = verify_and_extract_command(cmd, api_secret)
+        except SecurityError as e:
+            logging.error(f"[Security] REJECT command {cmd_id}: {e}")
+            push_result(cmd_id, agent_id,
+                        'failed', f"SECURITY: Signature không hợp lệ — {e}",
+                        backend_url, api_secret, ssl_verify, client_cert)
+            return
 
     action = command.get('action')
     params = command.get('params', '{}')
@@ -167,7 +164,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                     result_msg = f"Đã chặn IP {ip}"
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "blocked_ip", "connection": {"remote_ip": ip, "remote_port": "manual"}},
-                               api_secret, ssl_verify)
+                               api_secret, ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể chặn IP {ip} — kiểm tra quyền root"
 
@@ -180,7 +177,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                 if success:
                     result_msg = f"Đã gỡ chặn IP {ip}"
                     send_event(backend_url, agent_id, 'Network',
-                               {"action": "unblocked_ip", "ip": ip}, api_secret, ssl_verify)
+                               {"action": "unblocked_ip", "ip": ip}, api_secret, ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể gỡ chặn IP {ip} — rule có thể không tồn tại"
 
@@ -221,7 +218,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                 send_event(backend_url, agent_id, 'Network', {
                     "action": "added_rule", "chain": chain,
                     "protocol": protocol, "port": port, "target": target,
-                }, api_secret, ssl_verify)
+                }, api_secret, ssl_verify, client_cert)
             else:
                 result_msg = "Không thể thêm rule — kiểm tra cú pháp và quyền root"
 
@@ -234,7 +231,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                     result_msg = f"Đã xóa rule số {num} khỏi chain {chain}"
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "deleted_rule", "chain": chain, "num": num},
-                               api_secret, ssl_verify)
+                               api_secret, ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể xóa rule số {num}"
             else:
@@ -250,7 +247,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                             "action": "deleted_rule", "chain": chain,
                             "protocol": params.get('protocol', 'tcp'),
                             "port": port, "target": target,
-                        }, api_secret, ssl_verify)
+                        }, api_secret, ssl_verify, client_cert)
                     else:
                         result_msg = f"Không tìm thấy rule {chain} port {port} → {target}"
 
@@ -262,21 +259,15 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
         logging.error(f"[CMD] Lỗi thực thi: {e}")
 
     status_val = "done" if success else "failed"
-    push_result(redis_client, cmd_id, agent_id, status_val, result_msg,
-                backend_url, api_secret, ssl_verify)
+    push_result(cmd_id, agent_id, status_val, result_msg,
+                backend_url, api_secret, ssl_verify, client_cert)
 
 
 # ─── Heartbeat — Metrics + Fallback Commands ──────────────────────────────────
 
 def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
-                   listen_port, redis_client, ssl_verify=False, interval=30):
-    """
-    Mỗi `interval` giây:
-      1. Gửi metrics + listen_port lên backend (backend lưu agent.url từ port này)
-      2. Nhận lệnh fallback (chỉ có khi direct push thất bại trước đó)
-      3. Thực thi fallback commands — kết quả vẫn đi qua Redis
-      4. Tự động chặn kết nối nghi ngờ
-    """
+                   listen_port, ssl_verify=False, client_cert=None, interval=30):
+    """Mỗi `interval` giây: gửi metrics lên backend + tự động chặn kết nối nghi ngờ."""
     while True:
         try:
             metrics        = collect_metrics()
@@ -296,21 +287,10 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
                 headers={"X-Agent-Key": api_secret},
                 timeout=10,
                 verify=ssl_verify,
+                cert=client_cert,
             )
-
-            data     = res.json()
-            commands = data.get('commands', [])
-
-            if commands:
-                logging.info(f"[HB] Nhận {len(commands)} lệnh fallback")
-                for cmd in commands:
-                    threading.Thread(
-                        target=execute_command_logic,
-                        args=(backend_url, agent_id, cmd, api_secret, redis_client, ssl_verify),
-                        daemon=True,
-                    ).start()
-            else:
-                logging.info(f"[HB] CPU {metrics['cpu_percent']}% | RAM {metrics['memory_percent']}% | OK")
+            res.raise_for_status()
+            logging.info(f"[HB] CPU {metrics['cpu_percent']}% | RAM {metrics['memory_percent']}% | OK")
 
             for conn in get_suspicious_network_connections():
                 remote_ip = conn['remote_ip']
@@ -318,7 +298,7 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
                 if block_ip(remote_ip):
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "blocked_ip", "connection": conn},
-                               api_secret, ssl_verify)
+                               api_secret, ssl_verify, client_cert)
 
         except Exception as e:
             logging.error(f"[HB] Lỗi: {e}")
@@ -331,14 +311,31 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
 def main():
     config      = load_config()
     backend_url = config.get('backend_url', 'https://localhost:3000')
-    agent_id    = get_agent_id()
     hostname    = socket.gethostname()
+
+    # ── Enrollment lần đầu — sinh cert nếu chưa có ──────────────────────────
+    if not is_enrolled():
+        logging.info('=== Agent chưa có cert — bắt đầu enrollment ===')
+        try:
+            enroll(backend_url, hostname)   # code luôn nhập thủ công qua stdin
+        except Exception as e:
+            logging.error(f'Enrollment thất bại: {e}')
+            sys.exit(1)
+
+    # ── Khởi động bình thường với mTLS ───────────────────────────────────────
+    agent_id    = get_agent_id()
     api_secret  = config.get('api_key')
-    ssl_verify  = parse_ssl_verify(config.get('ssl_verify', False))
+    ssl_verify  = parse_ssl_verify(config.get('ssl_verify', './certs/ca-cert.pem'))
     listen_port = config.get('listen_port', 8443)
     agent_cert  = config.get('agent_cert', './certs/agent-cert.pem')
     agent_key   = config.get('agent_key',  './certs/agent-key.pem')
-    redis_url   = config.get('redis_url',  'redis://localhost:6379')
+    ca_cert     = config.get('ca_cert',    './certs/ca-cert.pem')
+
+    # client_cert: agent trình cert này khi gọi lên backend (mTLS client-side)
+    import os
+    client_cert = (agent_cert, agent_key) if (
+        os.path.exists(agent_cert) and os.path.exists(agent_key)
+    ) else None
 
     if not api_secret or len(api_secret) < 32:
         logging.error("─" * 60)
@@ -346,38 +343,32 @@ def main():
         logging.error("─" * 60)
         time.sleep(5)
 
-    redis_client = redis_lib.Redis.from_url(redis_url, decode_responses=True)
-    try:
-        redis_client.ping()
-        logging.info(f"[Redis] Connected → {redis_url}")
-    except Exception as e:
-        logging.error(f"[Redis] Không kết nối được: {e}")
-
     ssl_label = ("✗ tắt (self-signed)" if ssl_verify is False
                  else ("✓ CA hệ thống" if ssl_verify is True
                        else f"✓ cert: {ssl_verify}"))
 
     logging.info(f"=== EDR Agent | ID: {agent_id} | Host: {hostname} ===")
     logging.info(f"    Backend    : {backend_url}")
-    logging.info(f"    Auth       : HMAC {'✓ enabled' if api_secret else '✗ DISABLED'}")
+    logging.info(f"    Auth       : X-Agent-Key {'✓' if api_secret else '✗ DISABLED'}")
     logging.info(f"    TLS verify : {ssl_label}")
-    logging.info(f"    Server     : HTTPS :{listen_port}  (nhận lệnh trực tiếp)")
-    logging.info(f"    Results    : Redis {redis_url} → {RESULTS_KEY}")
+    logging.info(f"    mTLS client: {'✓ ' + agent_cert if client_cert else '✗ cert không tìm thấy'}")
+    logging.info(f"    Server     : HTTPS :{listen_port}  (nhận lệnh trực tiếp qua mTLS)")
 
     def _server_callback(cmd):
+        # trusted=True: lệnh đến qua mTLS — danh tính backend đã được xác thực ở TLS layer
         execute_command_logic(backend_url, agent_id, cmd, api_secret,
-                              redis_client, ssl_verify)
+                              ssl_verify, client_cert, trusted=True)
 
     threads = [
         threading.Thread(
             target=run_agent_server,
-            args=(listen_port, agent_cert, agent_key, api_secret, _server_callback),
+            args=(listen_port, agent_cert, agent_key, ca_cert, _server_callback),
             daemon=True,
         ),
         threading.Thread(
             target=heartbeat_loop,
             args=(backend_url, agent_id, hostname, api_secret,
-                  listen_port, redis_client, ssl_verify),
+                  listen_port, ssl_verify, client_cert),
             daemon=True,
         ),
         threading.Thread(target=run_metrics, daemon=True),

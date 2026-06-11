@@ -2,14 +2,30 @@ const express = require('express');
 const router = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { detectRules } = require('../services/ruleEngine');
-const agentController = require('../controllers/agentController');
-const eventController = require('../controllers/eventController');
-const alertController = require('../controllers/alertController');
+const agentController  = require('../controllers/agentController');
+const eventController  = require('../controllers/eventController');
+const alertController  = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
-const { processResult }  = require('../lib/resultConsumer');
+const enrollController = require('../controllers/enrollController');
+const { processResult } = require('../lib/resultConsumer');
 const { agentAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
+
+// ─── Enrollment — public endpoints (agent chưa có cert) ──────────────────────
+// /api/enroll/status/:id dùng UUID (128-bit entropy) thay cho auth — đủ bảo mật
+// ca-cert.pem được đóng gói sẵn trong agent installer — không cần endpoint /ca-cert
+
+router.post('/enroll',                  enrollController.enroll);
+router.get('/enroll/status/:requestId', enrollController.enrollStatus);
+
+// ─── Enrollment — admin endpoints (cần JWT + OTP khi tạo code) ───────────────
+
+router.post('/enroll/code',                          dashboardAuth, requireAdmin, enrollController.generateCode);
+router.get('/enroll/codes',                          dashboardAuth, requireAdmin, enrollController.listCodes);
+router.get('/enroll/requests',                       dashboardAuth, requireAdmin, enrollController.listRequests);
+router.post('/enroll/requests/:id/approve',          dashboardAuth, requireAdmin, enrollController.approveRequest);
+router.post('/enroll/requests/:id/reject',           dashboardAuth, requireAdmin, enrollController.rejectRequest);
 
 // ─── Agent routes — xác thực bằng X-Agent-Key ────────────────────────────────
 
