@@ -1,9 +1,61 @@
+/**
+ * Command Controller
+ *
+ * Luồng gửi lệnh:
+ *   Dashboard → POST /commands
+ *     → DB.create
+ *     → thử axios.post(agent.url/command)  [DIRECT HTTPS]
+ *     → nếu thất bại: Redis RPUSH cmd:pending  [FALLBACK POLLING]
+ *
+ * Luồng phản hồi:
+ *   Agent thực thi → Redis RPUSH results:queue
+ *   Backend ResultConsumer BLPOP → DB.update + Socket.IO emit dashboard
+ */
+
+const https  = require('https');
+const fs     = require('fs');
+const axios  = require('axios');
 const { PrismaClient } = require('@prisma/client');
+const { signCommand }  = require('../lib/security');
 
 const prisma = new PrismaClient();
 
-// Hàm nội bộ: tạo lệnh trong DB và gửi real-time qua socket nếu agent đang kết nối
-async function _createAndDispatch(agentId, action, params, io, agentSockets, batchJobId = null) {
+// Xây dựng httpsAgent per-agent dựa trên cert lưu trong DB (cert pinning — không cần PKI/CA).
+// Nếu agent chưa có key trong DB: fallback về AGENT_CA_CERT env var (tương thích ngược).
+async function _getHttpsAgentForAgent(agentId) {
+  const certPath = process.env.BACKEND_CERT;
+  const keyPath  = process.env.BACKEND_KEY;
+
+  const opts = { rejectUnauthorized: false };
+
+  // Ưu tiên 1: cert từ DB (cert pinning — không cần CA)
+  const agentKey = await prisma.agentKey.findUnique({ where: { agentId } });
+  if (agentKey) {
+    opts.rejectUnauthorized = true;
+    opts.ca = agentKey.certPem; // self-signed cert → cert itself is the trust anchor
+  } else {
+    // Ưu tiên 2: AGENT_CA_CERT env var (legacy PKI path)
+    const caPath = process.env.AGENT_CA_CERT;
+    if (caPath && fs.existsSync(caPath)) {
+      opts.rejectUnauthorized = true;
+      opts.ca = fs.readFileSync(caPath);
+    } else {
+      console.warn(`[CMD] Agent ${agentId} chưa có key trong DB và AGENT_CA_CERT không cấu hình — bỏ qua TLS verify`);
+    }
+  }
+
+  // Backend client cert để agent server verify (mTLS)
+  if (certPath && fs.existsSync(certPath) && keyPath && fs.existsSync(keyPath)) {
+    opts.cert = fs.readFileSync(certPath);
+    opts.key  = fs.readFileSync(keyPath);
+  }
+
+  return new https.Agent(opts);
+}
+
+// ─── Internal: Tạo lệnh trong DB và dispatch ──────────────────────────────────
+
+async function _createAndDispatch(agentId, action, params, batchJobId = null) {
   const agent = await prisma.agent.findUnique({ where: { id: agentId } });
   if (!agent) return { ok: false, error: 'Agent không tồn tại', agentId };
 
@@ -11,29 +63,32 @@ async function _createAndDispatch(agentId, action, params, io, agentSockets, bat
     data: {
       agentId,
       action,
-      params: JSON.stringify(params || {}),
-      status: 'pending',
+      params:    JSON.stringify(params || {}),
+      status:    'pending',
       ...(batchJobId ? { batchJobId } : {}),
     },
   });
 
-  console.log(`[CMD] Lưu lệnh "${action}" tới DB cho agent ${agent.hostname} (${agentId})`);
+  if (!agent.url)
+    return { ok: false, error: `Agent ${agent.hostname} chưa có URL — chưa heartbeat lần nào`, agentId };
 
-  // Ưu tiên gửi qua socket để agent nhận ngay, nếu không có socket thì agent tự poll
-  const socketId = agentSockets && agentSockets[agentId];
-  if (io && socketId) {
-    io.to(socketId).emit('new_command', command);
-    console.log(`[WS] Đã gửi lệnh "${action}" (ID: ${command.id}) real-time xuống Agent.`);
-  } else {
-    console.log(`[WS] Agent '${agentId}' không kết nối socket. Chờ agent tự poll.`);
-  }
+  const signed = { ...command, signature: signCommand(command) };
 
+  // Không cần X-Backend-Key — mTLS đã xác thực danh tính tại TLS handshake
+  const httpsAgent = await _getHttpsAgentForAgent(agentId);
+  await axios.post(`${agent.url}/command`, signed, { timeout: 5000, httpsAgent });
+
+  await prisma.command.update({
+    where: { id: command.id },
+    data:  { status: 'in_progress' },
+  });
+
+  console.log(`[CMD] "${action}" → ${agent.hostname} [DIRECT HTTPS ✓]`);
   return { ok: true, command };
 }
 
-/**
- * POST /api/agents/:agentId/commands
- */
+// ─── POST /api/agents/:agentId/commands ───────────────────────────────────────
+
 exports.sendCommand = async (req, res) => {
   try {
     const { agentId } = req.params;
@@ -41,54 +96,47 @@ exports.sendCommand = async (req, res) => {
 
     if (!action) return res.status(400).json({ error: '"action" là bắt buộc' });
 
-    const io = req.app.get('io');
-    const agentSockets = req.app.get('agentSockets');
-    const result = await _createAndDispatch(agentId, action, params, io, agentSockets);
-
+    const result = await _createAndDispatch(agentId, action, params);
     if (!result.ok) return res.status(404).json({ error: result.error });
     res.status(201).json(result.command);
   } catch (error) {
-    console.error('Send command error:', error);
+    console.error('[CMD] sendCommand error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-/**
- * POST /api/commands/batch
- * Dùng Promise.allSettled để một agent lỗi không làm hỏng cả batch.
- * Tạo bản ghi BatchJob để retry worker và dashboard theo dõi tiến trình.
- */
+// ─── POST /api/commands/batch ──────────────────────────────────────────────────
+
 exports.sendBatchCommand = async (req, res) => {
   try {
     const { agentIds, action, params } = req.body;
 
     if (!Array.isArray(agentIds) || agentIds.length < 2)
-      return res.status(400).json({ error: '"agentIds" phải là mảng có ít nhất 2 phần tử' });
+      return res.status(400).json({ error: '"agentIds" phải là mảng ≥ 2 phần tử' });
     if (!action)
       return res.status(400).json({ error: '"action" là bắt buộc' });
 
     const io = req.app.get('io');
-    const agentSockets = req.app.get('agentSockets');
 
-    // Tạo BatchJob trước để có ID gắn vào từng command con
     const batchJob = await prisma.batchJob.create({
       data: {
         action,
-        params: JSON.stringify(params || {}),
-        totalAgents: agentIds.length,
+        params:           JSON.stringify(params || {}),
+        totalAgents:      agentIds.length,
         successfulAgents: [],
-        failedAgents: [],
-        status: 'dispatching',
+        failedAgents:     [],
+        status:           'dispatching',
       },
     });
 
     const settled = await Promise.allSettled(
-      agentIds.map(id => _createAndDispatch(id, action, params, io, agentSockets, batchJob.id))
+      agentIds.map(id => _createAndDispatch(id, action, params, batchJob.id))
     );
 
     const succeeded = settled
       .filter(r => r.status === 'fulfilled' && r.value.ok)
       .map(r => r.value.command);
+
     const failed = settled
       .filter(r => r.status === 'rejected' || (r.status === 'fulfilled' && !r.value.ok))
       .map(r =>
@@ -97,148 +145,47 @@ exports.sendBatchCommand = async (req, res) => {
           : { agentId: r.value.agentId, error: r.value.error }
       );
 
-    // Xác định trạng thái tổng thể của batch sau khi dispatch xong
     const jobStatus =
-      failed.length === 0 ? 'dispatched' :
-      succeeded.length === 0 ? 'failure' : 'partial_failure';
+      failed.length === 0    ? 'dispatched'     :
+      succeeded.length === 0 ? 'failure'         : 'partial_failure';
 
     await prisma.batchJob.update({
       where: { id: batchJob.id },
       data: {
         successfulAgents: succeeded.map(c => c.agentId),
-        failedAgents: failed.map(f => f.agentId),
-        status: jobStatus,
+        failedAgents:     failed.map(f => f.agentId),
+        status:           jobStatus,
       },
     });
 
-    // Thông báo kết quả dispatch ban đầu tới tất cả dashboard
     io?.to('dashboards').emit('batch_progress', {
       batchJobId: batchJob.id,
-      success: succeeded.length,
-      failed: failed.length,
-      total: agentIds.length,
-      status: jobStatus,
+      success:    succeeded.length,
+      failed:     failed.length,
+      total:      agentIds.length,
+      status:     jobStatus,
     });
 
-    const httpStatus = failed.length > 0 ? 207 : 201;
-    res.status(httpStatus).json({
+    res.status(failed.length > 0 ? 207 : 201).json({
       batchJobId: batchJob.id,
       dispatched: succeeded.length,
-      commands: succeeded,
-      errors: failed,
+      commands:   succeeded,
+      errors:     failed,
     });
   } catch (error) {
-    console.error('Batch command error:', error);
+    console.error('[CMD] sendBatchCommand error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-/**
- * GET /api/agents/:agentId/commands
- * Transaction nguyên tử: lấy các lệnh pending và chuyển sang in_progress,
- * tránh tình huống hai poll đồng thời cùng nhận một lệnh.
- */
-exports.pollCommands = async (req, res) => {
-  try {
-    const { agentId } = req.params;
+// ─── GET /api/agents/:agentId/commands/history ────────────────────────────────
 
-    const commands = await prisma.$transaction(async (tx) => {
-      const pending = await tx.command.findMany({
-        where: { agentId, status: 'pending' },
-        orderBy: { createdAt: 'asc' },
-      });
-
-      if (pending.length > 0) {
-        await tx.command.updateMany({
-          where: { id: { in: pending.map(c => c.id) } },
-          data: { status: 'in_progress' },
-        });
-      }
-
-      return pending;
-    });
-
-    res.json(commands);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-/**
- * PATCH /api/commands/:id/done
- * Đánh dấu lệnh hoàn thành/thất bại, phát command_result tới dashboard,
- * đồng thời cập nhật bộ đếm tiến trình BatchJob nếu lệnh thuộc một batch.
- */
-exports.markDone = async (req, res) => {
-  try {
-    const command = await prisma.command.update({
-      where: { id: req.params.id },
-      data: { status: req.body.status || 'done', doneAt: new Date() },
-    });
-
-    const io = req.app.get('io');
-    if (io) {
-      io.to('dashboards').emit('command_result', {
-        commandId: command.id,
-        agentId: command.agentId,
-        action: command.action,
-        status: command.status,
-        doneAt: command.doneAt,
-        batchJobId: command.batchJobId ?? null,
-      });
-
-      // Cập nhật bộ đếm BatchJob nếu lệnh này thuộc một batch
-      if (command.batchJobId) {
-        try {
-          const isDone = command.status === 'done';
-          const updatedJob = await prisma.batchJob.update({
-            where: { id: command.batchJobId },
-            // Dùng Prisma array push để thêm agentId vào mảng thành công/thất bại
-            data: isDone
-              ? { successfulAgents: { push: command.agentId } }
-              : { failedAgents: { push: command.agentId } },
-          });
-
-          const totalDone = updatedJob.successfulAgents.length + updatedJob.failedAgents.length;
-          let finalStatus = updatedJob.status;
-          if (totalDone >= updatedJob.totalAgents) {
-            // Tất cả agent đã phản hồi — xác định kết quả cuối cùng
-            finalStatus = updatedJob.failedAgents.length > 0 ? 'partial_failure' : 'success';
-            await prisma.batchJob.update({
-              where: { id: command.batchJobId },
-              data: { status: finalStatus },
-            });
-          }
-
-          io.to('dashboards').emit('batch_progress', {
-            batchJobId: command.batchJobId,
-            success: updatedJob.successfulAgents.length,
-            failed: updatedJob.failedAgents.length,
-            total: updatedJob.totalAgents,
-            status: finalStatus,
-          });
-        } catch (e) {
-          console.error('[CMD] BatchJob progress update error:', e.message);
-        }
-      }
-    }
-
-    res.json(command);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal server error' });
-  }
-};
-
-/**
- * GET /api/agents/:agentId/commands/history
- */
 exports.commandHistory = async (req, res) => {
   try {
-    const { agentId } = req.params;
     const commands = await prisma.command.findMany({
-      where: { agentId },
+      where:   { agentId: req.params.agentId },
       orderBy: { createdAt: 'desc' },
-      take: 50,
+      take:    50,
     });
     res.json(commands);
   } catch (error) {

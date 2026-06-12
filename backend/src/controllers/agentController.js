@@ -1,64 +1,76 @@
 const { PrismaClient } = require('@prisma/client');
-const prisma = new PrismaClient();
-const { detectRules } = require('../services/ruleEngine');
 
-// POST /api/heartbeat - Agent gửi heartbeat kèm thông tin hệ thống
+const prisma = new PrismaClient();
+
+// POST /api/heartbeat
+// Agent gửi metrics + port → backend lưu agent.url để push lệnh trực tiếp.
+// Response trả về lệnh fallback (nếu direct push trước đó thất bại).
 exports.heartbeat = async (req, res) => {
   try {
-    const { agentId, hostname, ip, cpu_percent, memory_percent, iptables_rules, network_interfaces } = req.body;
+    const {
+      agentId, hostname, ip, port,
+      cpu_percent, memory_percent,
+      iptables_rules, network_interfaces,
+    } = req.body;
+
     const id = agentId || require('crypto').randomUUID();
+
+    // Xây dựng URL của agent server từ IP + port
+    const rawIp  = (ip || req.ip || '127.0.0.1').replace('::ffff:', '');
+    const agentUrl = port ? `https://${rawIp}:${port}` : null;
 
     const agent = await prisma.agent.upsert({
       where: { id },
-      update: { 
-        lastHeartbeat: new Date(), 
-        status: 'online', 
-        cpuPercent: cpu_percent, 
-        memPercent: memory_percent,
-        ...(iptables_rules !== undefined ? { iptablesRules: iptables_rules } : {}),
-        ...(network_interfaces !== undefined ? { interfaces: JSON.stringify(network_interfaces) } : {})
+      update: {
+        lastHeartbeat: new Date(),
+        status:        'online',
+        cpuPercent:    cpu_percent,
+        memPercent:    memory_percent,
+        ...(agentUrl                  ? { url: agentUrl }                               : {}),
+        ...(iptables_rules  !== undefined ? { iptablesRules: iptables_rules }           : {}),
+        ...(network_interfaces !== undefined ? { interfaces: JSON.stringify(network_interfaces) } : {}),
       },
-      create: { 
-        id, 
-        hostname: hostname || 'Unknown-Host', 
-        ip: ip || req.ip || '127.0.0.1', 
-        cpuPercent: cpu_percent, 
-        memPercent: memory_percent,
-        iptablesRules: iptables_rules || null,
-        interfaces: network_interfaces ? JSON.stringify(network_interfaces) : null
-      }
+      create: {
+        id,
+        hostname:      hostname || 'Unknown-Host',
+        ip:            rawIp,
+        url:           agentUrl,
+        cpuPercent:    cpu_percent,
+        memPercent:    memory_percent,
+        iptablesRules: iptables_rules    || null,
+        interfaces:    network_interfaces ? JSON.stringify(network_interfaces) : null,
+      },
     });
 
-    res.json({ status: 'ok', agentId: agent.id });
+    res.json({ status: 'ok', agentId: agent.id, commands: [] });
   } catch (error) {
-    console.error('Heartbeat error:', error);
+    console.error('[HB] Heartbeat error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// GET /api/agents - Dashboard đọc danh sách agent
-exports.listAgents = async (req, res) => {
+// GET /api/agents
+exports.listAgents = async (_req, res) => {
   try {
     const agents = await prisma.agent.findMany({ orderBy: { lastHeartbeat: 'desc' } });
     const now = new Date();
-    // Agent được coi là offline nếu không có heartbeat trong 2 phút gần nhất
-    const updatedAgents = agents.map(a => {
-      const isOnline = (now - new Date(a.lastHeartbeat)) < 120000;
-      return { ...a, status: isOnline ? 'online' : 'offline' };
-    });
-    res.json(updatedAgents);
+    const result = agents.map(a => ({
+      ...a,
+      status: (now - new Date(a.lastHeartbeat)) < 120_000 ? 'online' : 'offline',
+    }));
+    res.json(result);
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
-// GET /api/stats - Dashboard đọc số liệu tổng quan (Số agent, số alert đang active, số event trong 24h)
-exports.getStats = async (req, res) => {
+// GET /api/stats
+exports.getStats = async (_req, res) => {
   try {
     const [totalAgents, activeAlerts, totalEvents] = await Promise.all([
       prisma.agent.count(),
       prisma.alert.count({ where: { resolved: false } }),
-      prisma.event.count()
+      prisma.event.count(),
     ]);
     res.json({ agents: totalAgents, alerts: activeAlerts, events: totalEvents });
   } catch (error) {

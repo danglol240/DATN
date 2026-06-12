@@ -1,0 +1,39 @@
+groups:
+- name: agent-alerts
+  rules:
+
+  - alert: HighCPU
+    expr: agent_cpu_usage > 80
+    for: 1m
+    labels:
+      severity: warning
+
+  - alert: HighMemory
+    expr: agent_memory_usage > 85
+    for: 1m
+    labels:
+      severity: warning
+
+  - alert: AgentDown
+    expr: up{job="agents"} == 0
+    for: 2m
+    labels:
+      severity: critical
+
+  - alert: RedisDown
+    expr: up{job="redis"} == 0
+    for: 1m
+    labels:
+      severity: critical
+
+  - alert: RedisHighMemory
+    expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+    for: 2m
+    labels:
+      severity: warning
+
+  - alert: RedisQueueBacklog
+    expr: redis_list_length{key=~"cmd:pending:.*"} > 50
+    for: 5m
+    labels:
+      severity: warning

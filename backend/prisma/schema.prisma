@@ -11,6 +11,7 @@ model Agent {
   id            String    @id @default(uuid())
   hostname      String
   ip            String
+  url           String?
   os            String?
   status        String    @default("online")
   lastHeartbeat DateTime  @default(now())
@@ -22,6 +23,18 @@ model Agent {
   alerts        Alert[]
   events        Event[]
   commands      Command[]
+  agentKey      AgentKey?
+}
+
+model AgentKey {
+  id       String   @id @default(uuid())
+  agentId  String   @unique
+  label    String?
+  certPem  String   @db.Text
+  keyPem   String   @db.Text
+  addedAt  DateTime @default(now())
+  addedBy  String?
+  agent    Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
 
 model Event {
@@ -50,6 +63,7 @@ model Command {
   action     String
   params     String    @default("{}")
   status     String    @default("pending")
+  result     String?
   createdAt  DateTime  @default(now())
   doneAt     DateTime?
   batchJobId String?
@@ -68,4 +82,14 @@ model BatchJob {
   status           String   @default("pending")
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+}
+
+model User {
+  id               String   @id @default(uuid())
+  username         String   @unique
+  password         String
+  role             String   @default("viewer")
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now())
 }

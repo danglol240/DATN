@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 20s
+
+rule_files:
+  - "alert_rules.yml"
+
+scrape_configs:
+  - job_name: 'agents'
+    static_configs:
+      - targets:
+          - 192.168.0.107:9091
+
+  - job_name: 'backend'
+    static_configs:
+      - targets:
+          - 192.168.0.107:3000
+
+  - job_name: 'redis'
+    static_configs:
+      - targets:
+          - redis_exporter:9121
