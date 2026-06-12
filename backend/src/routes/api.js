@@ -6,32 +6,17 @@ const agentController  = require('../controllers/agentController');
 const eventController  = require('../controllers/eventController');
 const alertController  = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
-const enrollController = require('../controllers/enrollController');
+const agentKeyController = require('../controllers/agentKeyController');
 const { processResult } = require('../lib/resultConsumer');
-const { agentAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
+const { agentAuth, agentCertAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
 
 const prisma = new PrismaClient();
 
-// ─── Enrollment — public endpoints (agent chưa có cert) ──────────────────────
-// /api/enroll/status/:id dùng UUID (128-bit entropy) thay cho auth — đủ bảo mật
-// ca-cert.pem được đóng gói sẵn trong agent installer — không cần endpoint /ca-cert
-
-router.post('/enroll',                  enrollController.enroll);
-router.get('/enroll/status/:requestId', enrollController.enrollStatus);
-
-// ─── Enrollment — admin endpoints (cần JWT + OTP khi tạo code) ───────────────
-
-router.post('/enroll/code',                          dashboardAuth, requireAdmin, enrollController.generateCode);
-router.get('/enroll/codes',                          dashboardAuth, requireAdmin, enrollController.listCodes);
-router.get('/enroll/requests',                       dashboardAuth, requireAdmin, enrollController.listRequests);
-router.post('/enroll/requests/:id/approve',          dashboardAuth, requireAdmin, enrollController.approveRequest);
-router.post('/enroll/requests/:id/reject',           dashboardAuth, requireAdmin, enrollController.rejectRequest);
-
 // ─── Agent routes — xác thực bằng X-Agent-Key ────────────────────────────────
 
-router.post('/heartbeat', agentAuth, agentController.heartbeat);
+router.post('/heartbeat', agentAuth, agentCertAuth, agentController.heartbeat);
 
-router.post('/events', agentAuth, async (req, res) => {
+router.post('/events', agentAuth, agentCertAuth, async (req, res) => {
   try {
     const { agentId, type, data } = req.body;
     if (!agentId || !type)
@@ -66,7 +51,7 @@ router.post('/events', agentAuth, async (req, res) => {
 
 // Kết quả lệnh từ agent gửi thẳng về qua HTTP (primary path).
 // Nếu agent không reach được backend, fallback RPUSH results:queue → BLPOP consumer xử lý.
-router.post('/commands/result', agentAuth, async (req, res) => {
+router.post('/commands/result', agentAuth, agentCertAuth, async (req, res) => {
   const { commandId, agentId, status, result } = req.body;
   if (!commandId || !agentId || !status)
     return res.status(400).json({ error: 'commandId, agentId, status là bắt buộc' });
@@ -80,6 +65,15 @@ router.post('/commands/result', agentAuth, async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+// ─── Dashboard routes — xác thực bằng JWT Bearer token ───────────────────────
+
+// ─── Agent Key Management — thêm cert+key thủ công (không cần PKI) ──────────
+
+router.post('/agents/:agentId/keys',       dashboardAuth, requireAdmin, agentKeyController.addKey);
+router.get('/agents/:agentId/keys',        dashboardAuth, requireAdmin, agentKeyController.getKey);
+router.delete('/agents/:agentId/keys',     dashboardAuth, requireAdmin, agentKeyController.deleteKey);
+router.get('/agents/:agentId/keys/export', dashboardAuth, requireAdmin, agentKeyController.exportKey);
 
 // ─── Dashboard routes — xác thực bằng JWT Bearer token ───────────────────────
 

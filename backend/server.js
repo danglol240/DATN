@@ -20,9 +20,16 @@ let server;
 let protocol = 'http';
 
 if (SSL_CERT && SSL_KEY && fs.existsSync(SSL_CERT) && fs.existsSync(SSL_KEY)) {
-  server   = https.createServer({ cert: fs.readFileSync(SSL_CERT), key: fs.readFileSync(SSL_KEY) }, app);
+  server = https.createServer({
+    cert: fs.readFileSync(SSL_CERT),
+    key:  fs.readFileSync(SSL_KEY),
+    // requestCert: yêu cầu agent gửi client cert (mTLS)
+    // rejectUnauthorized: false → không reject ngay, để agentCertAuth middleware tự verify bằng DB
+    requestCert:        true,
+    rejectUnauthorized: false,
+  }, app);
   protocol = 'https';
-  console.log('TLS mode  → cert:', SSL_CERT);
+  console.log('TLS mode  → cert:', SSL_CERT, ' | mTLS requestCert: true');
 } else {
   server = http.createServer(app);
   if (SSL_CERT || SSL_KEY) {

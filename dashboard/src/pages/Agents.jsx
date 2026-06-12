@@ -3,9 +3,10 @@ import IptablesControl from '../components/IptablesControl';
 import EditRule from '../components/EditRule';
 import BatchProgress from '../components/BatchProgress';
 import BatchRuleModal from '../components/BatchRuleModal';
+import AgentKeyModal from '../components/AgentKeyModal';
 import { useAgents } from '../hooks/useApi';
 import { useSocket } from '../hooks/useSocket';
-import { Monitor, Search, MoreVertical, LayoutGrid, Users, ShieldAlert, ArrowLeft, RefreshCw, Trash2, Plus, Settings, X, Layers } from 'lucide-react';
+import { Monitor, Search, MoreVertical, LayoutGrid, Users, ShieldAlert, ArrowLeft, RefreshCw, Trash2, Plus, Settings, X, Layers, Key } from 'lucide-react';
 
 import { sendCommand, sendCommandBatch } from '../hooks/useApi';
 
@@ -78,6 +79,9 @@ export default function Agents() {
   // States for Add Rule Modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [newRule, setNewRule] = useState({ action: 'ACCEPT', protocol: 'tcp', port: '' });
+
+  // State for Key Management Modal
+  const [keyModalAgent, setKeyModalAgent] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const menuRef = useRef();
@@ -507,6 +511,10 @@ export default function Agents() {
                             onClick={() => { setActiveAgent(a); setView('iptables'); setOpenMenuId(null); }}
                             className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors"
                           >Config/View Iptables</button>
+                          <button
+                            onClick={() => { setKeyModalAgent(a); setOpenMenuId(null); }}
+                            className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors flex items-center gap-2"
+                          ><Key size={14} className="text-gray-500" /> Manage TLS Key</button>
                           <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">Manage Policies</button>
                           <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">View Device Info</button>
                           <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">View Associated Users</button>
@@ -532,6 +540,11 @@ export default function Agents() {
           onSubmit={handleBatchSubmit}
           onCancel={() => setShowBatchModal(false)}
         />
+      )}
+
+      {/* Agent Key Modal */}
+      {keyModalAgent && (
+        <AgentKeyModal agent={keyModalAgent} onClose={() => setKeyModalAgent(null)} />
       )}
 
       {/* Batch progress widget — floats bottom-right */}

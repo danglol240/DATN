@@ -23,6 +23,18 @@ model Agent {
   alerts        Alert[]
   events        Event[]
   commands      Command[]
+  agentKey      AgentKey?
+}
+
+model AgentKey {
+  id       String   @id @default(uuid())
+  agentId  String   @unique
+  label    String?
+  certPem  String   @db.Text
+  keyPem   String   @db.Text
+  addedAt  DateTime @default(now())
+  addedBy  String?
+  agent    Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
 }
 
 model Event {
@@ -73,39 +85,11 @@ model BatchJob {
 }
 
 model User {
-  id                  String               @id @default(uuid())
-  username            String               @unique
-  password            String
-  role                String               @default("viewer")
-  twoFactorSecret     String?
-  twoFactorEnabled    Boolean              @default(false)
-  createdAt           DateTime             @default(now())
-  enrollmentCodes     EnrollmentCode[]
-  enrollmentReviews   EnrollmentRequest[]
-}
-
-model EnrollmentCode {
-  code            String    @id
-  createdBy       String
-  creator         User      @relation(fields: [createdBy], references: [id])
-  createdAt       DateTime  @default(now())
-  expiresAt       DateTime
-  used            Boolean   @default(false)
-  usedAt          DateTime?
-  usedByHostname  String?
-}
-
-// Yêu cầu enrollment — chờ admin duyệt thủ công trước khi ký cert.
-// status: pending → approved | rejected → delivered (sau khi agent lấy cert)
-model EnrollmentRequest {
-  id           String    @id @default(uuid())
-  hostname     String?
-  agentIp      String
-  csr          String    @db.Text
-  status       String    @default("pending")
-  createdAt    DateTime  @default(now())
-  reviewedAt   DateTime?
-  reviewedBy   String?
-  reviewer     User?     @relation(fields: [reviewedBy], references: [id])
-  cert         String?   @db.Text  // bị xóa sau khi agent lấy (one-time)
+  id               String   @id @default(uuid())
+  username         String   @unique
+  password         String
+  role             String   @default("viewer")
+  twoFactorSecret  String?
+  twoFactorEnabled Boolean  @default(false)
+  createdAt        DateTime @default(now())
 }

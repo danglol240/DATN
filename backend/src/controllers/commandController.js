@@ -20,42 +20,38 @@ const { signCommand }  = require('../lib/security');
 
 const prisma = new PrismaClient();
 
-// mTLS: backend verify cert của agent qua CA, đồng thời trình backend cert cho agent verify.
-// AGENT_CA_CERT → ca-cert.pem  |  BACKEND_CERT + BACKEND_KEY → backend-cert/key.pem
-function _buildHttpsAgent() {
-  const caPath   = process.env.AGENT_CA_CERT;
+// Xây dựng httpsAgent per-agent dựa trên cert lưu trong DB (cert pinning — không cần PKI/CA).
+// Nếu agent chưa có key trong DB: fallback về AGENT_CA_CERT env var (tương thích ngược).
+async function _getHttpsAgentForAgent(agentId) {
   const certPath = process.env.BACKEND_CERT;
   const keyPath  = process.env.BACKEND_KEY;
 
-  const caExists   = caPath   && fs.existsSync(caPath);
-  const certExists = certPath && fs.existsSync(certPath);
-  const keyExists  = keyPath  && fs.existsSync(keyPath);
+  const opts = { rejectUnauthorized: false };
 
-  if (!caExists) {
-    console.warn(caPath
-      ? `[CMD] AGENT_CA_CERT="${caPath}" không tồn tại — fallback không verify (dev only)`
-      : '[CMD] AGENT_CA_CERT chưa cấu hình — fallback không verify (dev only)');
-    return new https.Agent({ rejectUnauthorized: false });
-  }
-
-  const agentOptions = {
-    rejectUnauthorized: true,
-    ca: fs.readFileSync(caPath),
-  };
-
-  // Trình backend client cert để agent server verify (mTLS)
-  if (certExists && keyExists) {
-    agentOptions.cert = fs.readFileSync(certPath);
-    agentOptions.key  = fs.readFileSync(keyPath);
-    console.log('[CMD] mTLS enabled — backend trình client cert tới agent');
+  // Ưu tiên 1: cert từ DB (cert pinning — không cần CA)
+  const agentKey = await prisma.agentKey.findUnique({ where: { agentId } });
+  if (agentKey) {
+    opts.rejectUnauthorized = true;
+    opts.ca = agentKey.certPem; // self-signed cert → cert itself is the trust anchor
   } else {
-    console.warn('[CMD] BACKEND_CERT/KEY chưa cấu hình — bỏ qua mTLS client cert');
+    // Ưu tiên 2: AGENT_CA_CERT env var (legacy PKI path)
+    const caPath = process.env.AGENT_CA_CERT;
+    if (caPath && fs.existsSync(caPath)) {
+      opts.rejectUnauthorized = true;
+      opts.ca = fs.readFileSync(caPath);
+    } else {
+      console.warn(`[CMD] Agent ${agentId} chưa có key trong DB và AGENT_CA_CERT không cấu hình — bỏ qua TLS verify`);
+    }
   }
 
-  return new https.Agent(agentOptions);
-}
+  // Backend client cert để agent server verify (mTLS)
+  if (certPath && fs.existsSync(certPath) && keyPath && fs.existsSync(keyPath)) {
+    opts.cert = fs.readFileSync(certPath);
+    opts.key  = fs.readFileSync(keyPath);
+  }
 
-const httpsAgent = _buildHttpsAgent();
+  return new https.Agent(opts);
+}
 
 // ─── Internal: Tạo lệnh trong DB và dispatch ──────────────────────────────────
 
@@ -79,6 +75,7 @@ async function _createAndDispatch(agentId, action, params, batchJobId = null) {
   const signed = { ...command, signature: signCommand(command) };
 
   // Không cần X-Backend-Key — mTLS đã xác thực danh tính tại TLS handshake
+  const httpsAgent = await _getHttpsAgentForAgent(agentId);
   await axios.post(`${agent.url}/command`, signed, { timeout: 5000, httpsAgent });
 
   await prisma.command.update({

@@ -103,3 +103,38 @@ export async function resolveAlert(alertId) {
   if (!res.ok) throw new Error(`resolveAlert failed: HTTP ${res.status}`);
   return res.json();
 }
+
+// ─── Agent Key Management ─────────────────────────────────────────────────────
+
+export async function getAgentKey(agentId) {
+  const res = await fetch(`${BASE}/agents/${agentId}/keys`, { headers: authHeaders() });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`getAgentKey failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function addAgentKey(agentId, certPem, keyPem, label = '') {
+  const res = await fetch(`${BASE}/agents/${agentId}/keys`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ certPem, keyPem, label }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+export async function deleteAgentKey(agentId) {
+  const res = await fetch(`${BASE}/agents/${agentId}/keys`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  if (!res.ok) throw new Error(`deleteAgentKey failed: HTTP ${res.status}`);
+  return res.json();
+}
+
+export async function exportAgentKey(agentId) {
+  const res = await fetch(`${BASE}/agents/${agentId}/keys/export`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`exportAgentKey failed: HTTP ${res.status}`);
+  return res.json();
+}

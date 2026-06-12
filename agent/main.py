@@ -21,6 +21,7 @@ Heartbeat:
            ← { status, agentId, commands: [...] }   ← lệnh fallback nếu có
 """
 
+import os
 import sys
 import time
 import yaml
@@ -38,7 +39,6 @@ from modules.responder      import (block_ip, unblock_ip, add_custom_rule,
 from modules.metric_exporter import run_metrics
 from modules.security       import verify_and_extract_command, SecurityError
 from modules.agent_server   import run_agent_server
-from modules.enrollment     import is_enrolled, enroll
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -308,21 +308,27 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
+def _check_certs(agent_cert, agent_key, ca_cert):
+    """Kiểm tra cert+key có sẵn; nếu không, hướng dẫn dùng add_key.py."""
+    missing = [p for p in [agent_cert, agent_key] if not os.path.exists(p)]
+    if missing:
+        logging.error("─" * 60)
+        logging.error("Chưa có TLS cert+key cho agent!")
+        logging.error("Chạy lệnh sau để thêm key thủ công:")
+        logging.error("")
+        logging.error("  openssl req -x509 -newkey rsa:2048 -keyout agent.key \\")
+        logging.error("    -out agent.crt -days 3650 -nodes -subj \"/CN=$(hostname)/O=EDR\"")
+        logging.error("")
+        logging.error("  python add_key.py --cert agent.crt --key agent.key")
+        logging.error("─" * 60)
+        sys.exit(1)
+
+
 def main():
     config      = load_config()
     backend_url = config.get('backend_url', 'https://localhost:3000')
     hostname    = socket.gethostname()
 
-    # ── Enrollment lần đầu — sinh cert nếu chưa có ──────────────────────────
-    if not is_enrolled():
-        logging.info('=== Agent chưa có cert — bắt đầu enrollment ===')
-        try:
-            enroll(backend_url, hostname)   # code luôn nhập thủ công qua stdin
-        except Exception as e:
-            logging.error(f'Enrollment thất bại: {e}')
-            sys.exit(1)
-
-    # ── Khởi động bình thường với mTLS ───────────────────────────────────────
     agent_id    = get_agent_id()
     api_secret  = config.get('api_key')
     ssl_verify  = parse_ssl_verify(config.get('ssl_verify', './certs/ca-cert.pem'))
@@ -331,11 +337,10 @@ def main():
     agent_key   = config.get('agent_key',  './certs/agent-key.pem')
     ca_cert     = config.get('ca_cert',    './certs/ca-cert.pem')
 
+    _check_certs(agent_cert, agent_key, ca_cert)
+
     # client_cert: agent trình cert này khi gọi lên backend (mTLS client-side)
-    import os
-    client_cert = (agent_cert, agent_key) if (
-        os.path.exists(agent_cert) and os.path.exists(agent_key)
-    ) else None
+    client_cert = (agent_cert, agent_key)
 
     if not api_secret or len(api_secret) < 32:
         logging.error("─" * 60)
