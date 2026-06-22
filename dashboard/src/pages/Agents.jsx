@@ -4,11 +4,36 @@ import EditRule from '../components/EditRule';
 import BatchProgress from '../components/BatchProgress';
 import BatchRuleModal from '../components/BatchRuleModal';
 import AgentKeyModal from '../components/AgentKeyModal';
+import AgentHealthModal from '../components/AgentHealthModal';
 import { useAgents } from '../hooks/useApi';
 import { useSocket } from '../hooks/useSocket';
 import { Monitor, Search, MoreVertical, LayoutGrid, Users, ShieldAlert, ArrowLeft, RefreshCw, Trash2, Plus, Settings, X, Layers, Key } from 'lucide-react';
 
 import { sendCommand, sendCommandBatch } from '../hooks/useApi';
+
+function MiniBar({ value, label }) {
+  const pct = Math.min(100, Math.max(0, value ?? 0));
+  const color =
+    pct >= 90 ? 'bg-red-500' :
+    pct >= 70 ? 'bg-amber-500' :
+    'bg-emerald-500';
+  const textColor =
+    pct >= 90 ? 'text-red-400' :
+    pct >= 70 ? 'text-amber-400' :
+    'text-emerald-400';
+  if (value == null) return <span className="text-gray-600 text-xs">—</span>;
+  return (
+    <div className="flex flex-col gap-1 min-w-[72px]">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] text-gray-500">{label}</span>
+        <span className={`text-xs font-mono font-semibold ${textColor}`}>{pct.toFixed(0)}%</span>
+      </div>
+      <div className="w-full bg-[#111217] rounded-full h-1.5 overflow-hidden">
+        <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
 
 export default function Agents() {
   const { data: fetchedAgents, refetch: refetchAgents } = useAgents();
@@ -68,21 +93,27 @@ export default function Agents() {
   const [showBatchModal, setShowBatchModal] = useState(false);
   const [batchJobInfo, setBatchJobInfo] = useState(null); // { batchJobId, total, initialSuccess, initialFailed }
 
-  // Keep activeAgent in sync when liveAgents updates (metrics push, reconnect)
-  useEffect(() => {
-    if (activeAgent && agents) {
-      const updated = agents.find(a => a.id === activeAgent.id);
-      if (updated) setActiveAgent(updated);
-    }
-  }, [agents, activeAgent?.id]);
-
   // States for Add Rule Modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [newRule, setNewRule] = useState({ action: 'ACCEPT', protocol: 'tcp', port: '' });
 
   // State for Key Management Modal
   const [keyModalAgent, setKeyModalAgent] = useState(null);
+  const [healthModalAgent, setHealthModalAgent] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Keep activeAgent and healthModalAgent in sync when liveAgents updates
+  useEffect(() => {
+    if (!agents) return;
+    if (activeAgent) {
+      const updated = agents.find(a => a.id === activeAgent.id);
+      if (updated) setActiveAgent(updated);
+    }
+    if (healthModalAgent) {
+      const updated = agents.find(a => a.id === healthModalAgent.id);
+      if (updated) setHealthModalAgent(updated);
+    }
+  }, [agents, activeAgent?.id, healthModalAgent?.id]);
 
   const menuRef = useRef();
 
@@ -470,9 +501,9 @@ export default function Agents() {
                     onChange={toggleSelectAll} />
                 </th>
                 <th className="px-4 py-4 font-medium">Device Names</th>
-                <th className="px-4 py-4 font-medium">Users</th>
-                <th className="px-4 py-4 font-medium">OS Type</th>
-                <th className="px-4 py-4 font-medium">Agent Version</th>
+                <th className="px-4 py-4 font-medium">IP</th>
+                <th className="px-4 py-4 font-medium">CPU</th>
+                <th className="px-4 py-4 font-medium">Memory</th>
                 <th className="px-4 py-4 font-medium">Last Seen</th>
                 <th className="px-4 py-4 font-medium">Status</th>
                 <th className="px-4 py-4 font-medium text-center">Action</th>
@@ -486,11 +517,9 @@ export default function Agents() {
                       checked={selectedAgentIds.has(a.id)} onChange={() => toggleSelectAgent(a.id)} />
                   </td>
                   <td className="px-4 py-4 font-medium text-white uppercase">{a.hostname}</td>
-                  <td className="px-4 py-4">
-                    <div className="flex items-center gap-1.5 text-blue-400"><Users size={14} /> 1</div>
-                  </td>
-                  <td className="px-4 py-4">{a.os || 'Linux'}</td>
-                  <td className="px-4 py-4 text-gray-400">1.0.0</td>
+                  <td className="px-4 py-4 font-mono text-xs text-gray-400">{a.ip}</td>
+                  <td className="px-4 py-4"><MiniBar value={a.cpuPercent} label="CPU" /></td>
+                  <td className="px-4 py-4"><MiniBar value={a.memPercent} label="Mem" /></td>
                   <td className="px-4 py-4 text-gray-400">{new Date(a.lastHeartbeat).toLocaleString()}</td>
                   <td className="px-4 py-4">
                     <span className={`px-2 py-1 rounded text-xs font-medium ${a.status === 'online' ? 'text-green-400 bg-green-400/10' : 'text-red-400 bg-red-400/10'}`}>
@@ -516,7 +545,10 @@ export default function Agents() {
                             className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors flex items-center gap-2"
                           ><Key size={14} className="text-gray-500" /> Manage TLS Key</button>
                           <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">Manage Policies</button>
-                          <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">View Device Info</button>
+                          <button
+                            onClick={() => { setHealthModalAgent(a); setOpenMenuId(null); }}
+                            className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors"
+                          >View Device Info</button>
                           <button className="w-full text-left px-4 py-2.5 text-gray-300 hover:bg-[#25262E] hover:text-white transition-colors">View Associated Users</button>
                           <div className="border-t border-[#3A3B45] my-1"></div>
                           <button className="w-full text-left px-4 py-2.5 text-red-400 hover:bg-red-400/10 hover:text-red-300 transition-colors">Uninstall Agent</button>
@@ -545,6 +577,11 @@ export default function Agents() {
       {/* Agent Key Modal */}
       {keyModalAgent && (
         <AgentKeyModal agent={keyModalAgent} onClose={() => setKeyModalAgent(null)} />
+      )}
+
+      {/* Agent Health Modal */}
+      {healthModalAgent && (
+        <AgentHealthModal agent={healthModalAgent} onClose={() => setHealthModalAgent(null)} />
       )}
 
       {/* Batch progress widget — floats bottom-right */}

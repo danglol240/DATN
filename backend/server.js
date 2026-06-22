@@ -61,7 +61,7 @@ app.get('/metrics', async (_req, res) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`[EDR Backend] Listening on ${protocol}://0.0.0.0:${PORT}`);
-  console.log('  Auth          → X-Agent-Key (API_KEY)');
+  console.log('  Agent auth    → mTLS cert pinning (DB)');
   console.log('  Agent push    → HTTPS direct mTLS → agent:8443/command');
   console.log('  Results       → POST /api/commands/result (HTTP direct)');
   console.log('  Socket.IO     → Dashboard real-time broadcast');

@@ -3,13 +3,14 @@ import Dashboard from './pages/Dashboard';
 import Agents from './pages/Agents';
 import Events from './pages/Events';
 import Alerts from './pages/Alerts';
+import AuditLog from './pages/AuditLog';
 import Settings from './pages/Settings';
 import Login from './pages/Login';
 import ToastContainer, { useToast } from './components/Toast';
 import { useSocket } from './hooks/useSocket';
 import { useAuth } from './hooks/useAuth';
 import {
-  LayoutDashboard, Server, Activity, ShieldAlert,
+  LayoutDashboard, Server, Activity, ShieldAlert, ClipboardList,
   Menu, Wifi, WifiOff, LogOut, User, Settings as SettingsIcon,
 } from 'lucide-react';
 
@@ -50,6 +51,7 @@ function App() {
     { id: 'agents',    icon: Server,          label: 'Agents' },
     { id: 'events',    icon: Activity,        label: 'Events' },
     { id: 'alerts',    icon: ShieldAlert,     label: 'Alerts' },
+    ...(user?.role === 'admin' ? [{ id: 'auditlog', icon: ClipboardList, label: 'Audit Log' }] : []),
   ];
 
   return (
@@ -141,6 +143,7 @@ function App() {
           {page === 'agents'    && <Agents />}
           {page === 'events'    && <Events />}
           {page === 'alerts'    && <Alerts />}
+          {page === 'auditlog'  && <AuditLog />}
           {page === 'settings'  && <Settings user={user} />}
         </div>
       </main>

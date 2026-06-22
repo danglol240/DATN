@@ -1,6 +1,96 @@
-import React, { useState, useEffect } from 'react';
-import { Key, X, Trash2, Download, Plus, Copy, Check, AlertTriangle, Shield } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Key, X, Trash2, Download, Plus, Copy, Check, AlertTriangle, Shield, Upload, FileText, CheckCircle2 } from 'lucide-react';
 import { getAgentKey, addAgentKey, deleteAgentKey, exportAgentKey } from '../hooks/useApi';
+
+function PemFileInput({ label, required, accept, value, onChange }) {
+  const inputRef = useRef();
+  const [dragging, setDragging] = useState(false);
+  const [fileName, setFileName] = useState('');
+
+  const readFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      onChange(e.target.result);
+      setFileName(file.name);
+    };
+    reader.readAsText(file);
+  };
+
+  const onFileChange = (e) => readFile(e.target.files[0]);
+
+  const onDrop = (e) => {
+    e.preventDefault();
+    setDragging(false);
+    readFile(e.dataTransfer.files[0]);
+  };
+
+  const onDragOver = (e) => { e.preventDefault(); setDragging(true); };
+  const onDragLeave = () => setDragging(false);
+
+  const hasContent = value && value.trim().length > 0;
+
+  return (
+    <div>
+      <label className="block text-xs text-gray-500 mb-1.5">
+        {label} {required && <span className="text-red-500">*</span>}
+      </label>
+
+      {/* Drop zone */}
+      <div
+        onClick={() => inputRef.current.click()}
+        onDrop={onDrop}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        className={`relative flex flex-col items-center justify-center gap-2 rounded-lg border-2 border-dashed cursor-pointer transition-colors py-5
+          ${dragging
+            ? 'border-[#FF2E63] bg-[#FF2E63]/5'
+            : hasContent
+            ? 'border-green-500/40 bg-green-500/5 hover:bg-green-500/10'
+            : 'border-[#3A3B45] bg-[#111217] hover:border-[#FF2E63]/50 hover:bg-[#FF2E63]/5'
+          }`}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept={accept}
+          onChange={onFileChange}
+          className="hidden"
+        />
+
+        {hasContent ? (
+          <>
+            <CheckCircle2 size={22} className="text-green-400" />
+            <div className="text-center">
+              <p className="text-sm text-green-400 font-medium">{fileName || 'File đã tải'}</p>
+              <p className="text-xs text-gray-500 mt-0.5">Click để chọn file khác</p>
+            </div>
+          </>
+        ) : (
+          <>
+            <Upload size={22} className={dragging ? 'text-[#FF2E63]' : 'text-gray-500'} />
+            <div className="text-center">
+              <p className="text-sm text-gray-300">Kéo thả hoặc <span className="text-[#FF2E63]">chọn file</span></p>
+              <p className="text-xs text-gray-600 mt-0.5">.pem · .crt · .key</p>
+            </div>
+          </>
+        )}
+      </div>
+
+      {/* Preview */}
+      {hasContent && (
+        <details className="mt-2">
+          <summary className="cursor-pointer text-xs text-gray-600 hover:text-gray-400 select-none flex items-center gap-1">
+            <FileText size={11} /> Xem nội dung
+          </summary>
+          <pre className="mt-1.5 bg-[#111217] border border-[#2E2F3A] rounded-lg p-3 text-[11px] text-gray-400 font-mono whitespace-pre-wrap break-all max-h-32 overflow-y-auto">
+            {value}
+          </pre>
+        </details>
+      )}
+    </div>
+  );
+}
 
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false);
@@ -219,8 +309,8 @@ export default function AgentKeyModal({ agent, onClose }) {
                   <CopyBtn text={genCmd} />
                 </div>
                 <p className="text-xs text-gray-600">
-                  2. Copy nội dung <code className="text-gray-400">agent.crt</code> và{' '}
-                  <code className="text-gray-400">agent.key</code> vào bên dưới.
+                  2. Upload file <code className="text-gray-400">agent.crt</code> và{' '}
+                  <code className="text-gray-400">agent.key</code> bên dưới.
                 </p>
               </div>
 
@@ -234,39 +324,27 @@ export default function AgentKeyModal({ agent, onClose }) {
                 />
               </div>
 
-              <div>
-                <label className="block text-xs text-gray-500 mb-1.5">
-                  Certificate PEM <span className="text-red-500">*</span>
-                  <span className="ml-2 text-gray-600">(nội dung file agent.crt)</span>
-                </label>
-                <textarea
-                  rows={6}
-                  value={certPem}
-                  onChange={e => setCertPem(e.target.value)}
-                  placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----END CERTIFICATE-----"
-                  className="w-full bg-[#111217] border border-[#2E2F3A] rounded-lg px-3 py-2 text-xs text-gray-300 font-mono focus:outline-none focus:border-[#FF2E63]/50 resize-none"
-                />
-              </div>
+              <PemFileInput
+                label="Certificate PEM (file .crt hoặc .pem)"
+                required
+                accept=".pem,.crt,.cer"
+                value={certPem}
+                onChange={setCertPem}
+              />
 
-              <div>
-                <label className="block text-xs text-gray-500 mb-1.5">
-                  Private Key PEM <span className="text-red-500">*</span>
-                  <span className="ml-2 text-gray-600">(nội dung file agent.key)</span>
-                </label>
-                <textarea
-                  rows={6}
-                  value={keyPem}
-                  onChange={e => setKeyPem(e.target.value)}
-                  placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----"
-                  className="w-full bg-[#111217] border border-[#2E2F3A] rounded-lg px-3 py-2 text-xs text-gray-300 font-mono focus:outline-none focus:border-[#FF2E63]/50 resize-none"
-                />
-              </div>
+              <PemFileInput
+                label="Private Key PEM (file .key hoặc .pem)"
+                required
+                accept=".pem,.key"
+                value={keyPem}
+                onChange={setKeyPem}
+              />
 
               <div className="flex gap-3 pt-1">
                 <button
                   onClick={handleSave}
-                  disabled={saving}
-                  className="flex items-center gap-2 text-sm px-5 py-2 bg-[#FF2E63] hover:bg-[#FF2E63]/80 text-white rounded-lg transition disabled:opacity-50 font-medium"
+                  disabled={saving || !certPem.trim() || !keyPem.trim()}
+                  className="flex items-center gap-2 text-sm px-5 py-2 bg-[#FF2E63] hover:bg-[#FF2E63]/80 text-white rounded-lg transition disabled:opacity-40 disabled:cursor-not-allowed font-medium"
                 >
                   <Plus size={14} /> {saving ? 'Đang lưu...' : 'Lưu Key'}
                 </button>

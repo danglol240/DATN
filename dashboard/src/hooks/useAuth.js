@@ -2,7 +2,7 @@ import { useState, useCallback } from 'react';
 
 const TOKEN_KEY = 'edr_token';
 const USER_KEY  = 'edr_user';
-const BASE = 'http://localhost:3000';
+const BASE = '';
 
 export function getStoredToken() {
   return localStorage.getItem(TOKEN_KEY);

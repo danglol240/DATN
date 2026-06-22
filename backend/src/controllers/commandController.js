@@ -16,32 +16,22 @@ const https  = require('https');
 const fs     = require('fs');
 const axios  = require('axios');
 const { PrismaClient } = require('@prisma/client');
-const { signCommand }  = require('../lib/security');
-
+const { logAudit } = require('../lib/audit');
 const prisma = new PrismaClient();
 
-// Xây dựng httpsAgent per-agent dựa trên cert lưu trong DB (cert pinning — không cần PKI/CA).
-// Nếu agent chưa có key trong DB: fallback về AGENT_CA_CERT env var (tương thích ngược).
+// Xây dựng httpsAgent per-agent dựa trên cert lưu trong DB (cert pinning).
 async function _getHttpsAgentForAgent(agentId) {
   const certPath = process.env.BACKEND_CERT;
   const keyPath  = process.env.BACKEND_KEY;
 
   const opts = { rejectUnauthorized: false };
 
-  // Ưu tiên 1: cert từ DB (cert pinning — không cần CA)
   const agentKey = await prisma.agentKey.findUnique({ where: { agentId } });
   if (agentKey) {
     opts.rejectUnauthorized = true;
-    opts.ca = agentKey.certPem; // self-signed cert → cert itself is the trust anchor
+    opts.ca = agentKey.certPem;
   } else {
-    // Ưu tiên 2: AGENT_CA_CERT env var (legacy PKI path)
-    const caPath = process.env.AGENT_CA_CERT;
-    if (caPath && fs.existsSync(caPath)) {
-      opts.rejectUnauthorized = true;
-      opts.ca = fs.readFileSync(caPath);
-    } else {
-      console.warn(`[CMD] Agent ${agentId} chưa có key trong DB và AGENT_CA_CERT không cấu hình — bỏ qua TLS verify`);
-    }
+    console.warn(`[CMD] Agent ${agentId} chưa có cert trong DB — bỏ qua TLS verify`);
   }
 
   // Backend client cert để agent server verify (mTLS)
@@ -72,11 +62,8 @@ async function _createAndDispatch(agentId, action, params, batchJobId = null) {
   if (!agent.url)
     return { ok: false, error: `Agent ${agent.hostname} chưa có URL — chưa heartbeat lần nào`, agentId };
 
-  const signed = { ...command, signature: signCommand(command) };
-
-  // Không cần X-Backend-Key — mTLS đã xác thực danh tính tại TLS handshake
   const httpsAgent = await _getHttpsAgentForAgent(agentId);
-  await axios.post(`${agent.url}/command`, signed, { timeout: 5000, httpsAgent });
+  await axios.post(`${agent.url}/command`, command, { timeout: 5000, httpsAgent });
 
   await prisma.command.update({
     where: { id: command.id },
@@ -97,7 +84,11 @@ exports.sendCommand = async (req, res) => {
     if (!action) return res.status(400).json({ error: '"action" là bắt buộc' });
 
     const result = await _createAndDispatch(agentId, action, params);
-    if (!result.ok) return res.status(404).json({ error: result.error });
+    if (!result.ok) {
+      await logAudit(req, 'COMMAND_SEND', `agent:${agentId}`, `action=${action} — ${result.error}`, 'failure');
+      return res.status(404).json({ error: result.error });
+    }
+    await logAudit(req, 'COMMAND_SEND', `agent:${agentId}`, `action=${action}`, 'success');
     res.status(201).json(result.command);
   } catch (error) {
     console.error('[CMD] sendCommand error:', error);
@@ -165,6 +156,12 @@ exports.sendBatchCommand = async (req, res) => {
       total:      agentIds.length,
       status:     jobStatus,
     });
+
+    await logAudit(
+      req, 'COMMAND_BATCH_SEND', `batchJob:${batchJob.id}`,
+      `action=${action} total=${agentIds.length} ok=${succeeded.length} fail=${failed.length}`,
+      failed.length === agentIds.length ? 'failure' : 'success'
+    );
 
     res.status(failed.length > 0 ? 207 : 201).json({
       batchJobId: batchJob.id,

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getStoredToken } from './useAuth';
 
-const BASE = 'http://localhost:3000/api';
+const BASE = '/api';
 
 function authHeaders() {
   const token = getStoredToken();
@@ -137,4 +137,14 @@ export async function exportAgentKey(agentId) {
   const res = await fetch(`${BASE}/agents/${agentId}/keys/export`, { headers: authHeaders() });
   if (!res.ok) throw new Error(`exportAgentKey failed: HTTP ${res.status}`);
   return res.json();
+}
+
+// ─── Audit Logs ───────────────────────────────────────────────────────────────
+
+export function useAuditLogs(params = '') {
+  return usePoll(`${BASE}/audit-logs${params}`, 15000);
+}
+
+export function getAuditLogExportUrl() {
+  return `${BASE}/audit-logs/export`;
 }

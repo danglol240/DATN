@@ -37,7 +37,6 @@ from modules.collector      import collect_metrics, get_suspicious_network_conne
 from modules.responder      import (block_ip, unblock_ip, add_custom_rule,
                                     delete_custom_rule, kill_process, delete_rule_by_num)
 from modules.metric_exporter import run_metrics
-from modules.security       import verify_and_extract_command, SecurityError
 from modules.agent_server   import run_agent_server
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
@@ -75,12 +74,11 @@ def get_agent_id():
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
-def send_event(backend_url, agent_id, etype, data, api_secret, ssl_verify=False, client_cert=None):
+def send_event(backend_url, agent_id, etype, data, ssl_verify=False, client_cert=None):
     try:
         requests.post(
             f"{backend_url}/api/events",
             json={"agentId": agent_id, "type": etype, "data": json.dumps(data)},
-            headers={"X-Agent-Key": api_secret},
             timeout=5,
             verify=ssl_verify,
             cert=client_cert,
@@ -99,7 +97,7 @@ def get_current_iptables():
 
 
 def push_result(command_id, agent_id, status, result_msg,
-                backend_url, api_secret, ssl_verify=False, client_cert=None):
+                backend_url, ssl_verify=False, client_cert=None):
     payload = {
         'commandId': command_id,
         'agentId':   agent_id,
@@ -110,7 +108,6 @@ def push_result(command_id, agent_id, status, result_msg,
         r = requests.post(
             f"{backend_url}/api/commands/result",
             json=payload,
-            headers={"X-Agent-Key": api_secret},
             timeout=5,
             verify=ssl_verify,
             cert=client_cert,
@@ -125,25 +122,11 @@ def push_result(command_id, agent_id, status, result_msg,
 
 # ─── Command Executor ─────────────────────────────────────────────────────────
 
-def execute_command_logic(backend_url, agent_id, cmd, api_secret,
-                          ssl_verify=False, client_cert=None, trusted=False):
-    cmd_id = cmd.get('id')
-
-    if trusted:
-        # mTLS path: danh tính backend đã được xác thực tại TLS handshake — bỏ qua HMAC
-        command = cmd
-    else:
-        # Redis fallback path: không có mTLS → bắt buộc verify HMAC-SHA256
-        try:
-            command = verify_and_extract_command(cmd, api_secret)
-        except SecurityError as e:
-            logging.error(f"[Security] REJECT command {cmd_id}: {e}")
-            push_result(cmd_id, agent_id,
-                        'failed', f"SECURITY: Signature không hợp lệ — {e}",
-                        backend_url, api_secret, ssl_verify, client_cert)
-            return
-
-    action = command.get('action')
+def execute_command_logic(backend_url, agent_id, cmd,
+                          ssl_verify=False, client_cert=None):
+    cmd_id  = cmd.get('id')
+    command = cmd
+    action  = command.get('action')
     params = command.get('params', '{}')
     if isinstance(params, str):
         params = json.loads(params)
@@ -164,7 +147,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                     result_msg = f"Đã chặn IP {ip}"
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "blocked_ip", "connection": {"remote_ip": ip, "remote_port": "manual"}},
-                               api_secret, ssl_verify, client_cert)
+                               ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể chặn IP {ip} — kiểm tra quyền root"
 
@@ -177,7 +160,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                 if success:
                     result_msg = f"Đã gỡ chặn IP {ip}"
                     send_event(backend_url, agent_id, 'Network',
-                               {"action": "unblocked_ip", "ip": ip}, api_secret, ssl_verify, client_cert)
+                               {"action": "unblocked_ip", "ip": ip}, ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể gỡ chặn IP {ip} — rule có thể không tồn tại"
 
@@ -218,7 +201,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                 send_event(backend_url, agent_id, 'Network', {
                     "action": "added_rule", "chain": chain,
                     "protocol": protocol, "port": port, "target": target,
-                }, api_secret, ssl_verify, client_cert)
+                }, ssl_verify, client_cert)
             else:
                 result_msg = "Không thể thêm rule — kiểm tra cú pháp và quyền root"
 
@@ -231,7 +214,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                     result_msg = f"Đã xóa rule số {num} khỏi chain {chain}"
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "deleted_rule", "chain": chain, "num": num},
-                               api_secret, ssl_verify, client_cert)
+                               ssl_verify, client_cert)
                 else:
                     result_msg = f"Không thể xóa rule số {num}"
             else:
@@ -247,7 +230,7 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
                             "action": "deleted_rule", "chain": chain,
                             "protocol": params.get('protocol', 'tcp'),
                             "port": port, "target": target,
-                        }, api_secret, ssl_verify, client_cert)
+                        }, ssl_verify, client_cert)
                     else:
                         result_msg = f"Không tìm thấy rule {chain} port {port} → {target}"
 
@@ -260,12 +243,12 @@ def execute_command_logic(backend_url, agent_id, cmd, api_secret,
 
     status_val = "done" if success else "failed"
     push_result(cmd_id, agent_id, status_val, result_msg,
-                backend_url, api_secret, ssl_verify, client_cert)
+                backend_url, ssl_verify, client_cert)
 
 
-# ─── Heartbeat — Metrics + Fallback Commands ──────────────────────────────────
+# ─── Heartbeat ────────────────────────────────────────────────────────────────
 
-def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
+def heartbeat_loop(backend_url, agent_id, hostname,
                    listen_port, ssl_verify=False, client_cert=None, interval=30):
     """Mỗi `interval` giây: gửi metrics lên backend + tự động chặn kết nối nghi ngờ."""
     while True:
@@ -284,7 +267,6 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
                     "network_interfaces": metrics.get("network_interfaces", []),
                     "iptables_rules":     iptables_rules,
                 },
-                headers={"X-Agent-Key": api_secret},
                 timeout=10,
                 verify=ssl_verify,
                 cert=client_cert,
@@ -298,7 +280,7 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
                 if block_ip(remote_ip):
                     send_event(backend_url, agent_id, 'Network',
                                {"action": "blocked_ip", "connection": conn},
-                               api_secret, ssl_verify, client_cert)
+                               ssl_verify, client_cert)
 
         except Exception as e:
             logging.error(f"[HB] Lỗi: {e}")
@@ -308,7 +290,7 @@ def heartbeat_loop(backend_url, agent_id, hostname, api_secret,
 
 # ─── Entry Point ──────────────────────────────────────────────────────────────
 
-def _check_certs(agent_cert, agent_key, ca_cert):
+def _check_certs(agent_cert, agent_key, backend_cert):
     """Kiểm tra cert+key có sẵn; nếu không, hướng dẫn dùng add_key.py."""
     missing = [p for p in [agent_cert, agent_key] if not os.path.exists(p)]
     if missing:
@@ -323,6 +305,9 @@ def _check_certs(agent_cert, agent_key, ca_cert):
         logging.error("─" * 60)
         sys.exit(1)
 
+    if backend_cert and not os.path.exists(backend_cert):
+        logging.warning(f"[mTLS] backend_cert không tìm thấy: {backend_cert} — agent server sẽ bỏ qua verify client cert")
+
 
 def main():
     config      = load_config()
@@ -330,50 +315,38 @@ def main():
     hostname    = socket.gethostname()
 
     agent_id    = get_agent_id()
-    api_secret  = config.get('api_key')
-    ssl_verify  = parse_ssl_verify(config.get('ssl_verify', './certs/ca-cert.pem'))
+    ssl_verify  = parse_ssl_verify(config.get('ssl_verify', './certs/backend-cert.pem'))
     listen_port = config.get('listen_port', 8443)
     agent_cert  = config.get('agent_cert', './certs/agent-cert.pem')
     agent_key   = config.get('agent_key',  './certs/agent-key.pem')
-    ca_cert     = config.get('ca_cert',    './certs/ca-cert.pem')
+    backend_cert = config.get('backend_cert', './certs/backend-cert.pem')
 
-    _check_certs(agent_cert, agent_key, ca_cert)
+    _check_certs(agent_cert, agent_key, backend_cert)
 
-    # client_cert: agent trình cert này khi gọi lên backend (mTLS client-side)
     client_cert = (agent_cert, agent_key)
 
-    if not api_secret or len(api_secret) < 32:
-        logging.error("─" * 60)
-        logging.error("api_key chưa được cấu hình trong config.yaml!")
-        logging.error("─" * 60)
-        time.sleep(5)
-
-    ssl_label = ("✗ tắt (self-signed)" if ssl_verify is False
-                 else ("✓ CA hệ thống" if ssl_verify is True
-                       else f"✓ cert: {ssl_verify}"))
+    ssl_label = ("✗ tắt" if ssl_verify is False else f"✓ cert: {ssl_verify}")
 
     logging.info(f"=== EDR Agent | ID: {agent_id} | Host: {hostname} ===")
     logging.info(f"    Backend    : {backend_url}")
-    logging.info(f"    Auth       : X-Agent-Key {'✓' if api_secret else '✗ DISABLED'}")
+    logging.info(f"    Auth       : mTLS cert pinning")
     logging.info(f"    TLS verify : {ssl_label}")
-    logging.info(f"    mTLS client: {'✓ ' + agent_cert if client_cert else '✗ cert không tìm thấy'}")
+    logging.info(f"    mTLS client: ✓ {agent_cert}")
+    logging.info(f"    mTLS pin   : {'✓ ' + backend_cert if backend_cert and os.path.exists(backend_cert) else '✗ backend_cert không tìm thấy — bỏ qua verify'}")
     logging.info(f"    Server     : HTTPS :{listen_port}  (nhận lệnh trực tiếp qua mTLS)")
 
     def _server_callback(cmd):
-        # trusted=True: lệnh đến qua mTLS — danh tính backend đã được xác thực ở TLS layer
-        execute_command_logic(backend_url, agent_id, cmd, api_secret,
-                              ssl_verify, client_cert, trusted=True)
+        execute_command_logic(backend_url, agent_id, cmd, ssl_verify, client_cert)
 
     threads = [
         threading.Thread(
             target=run_agent_server,
-            args=(listen_port, agent_cert, agent_key, ca_cert, _server_callback),
+            args=(listen_port, agent_cert, agent_key, backend_cert, _server_callback),
             daemon=True,
         ),
         threading.Thread(
             target=heartbeat_loop,
-            args=(backend_url, agent_id, hostname, api_secret,
-                  listen_port, ssl_verify, client_cert),
+            args=(backend_url, agent_id, hostname, listen_port, ssl_verify, client_cert),
             daemon=True,
         ),
         threading.Thread(target=run_metrics, daemon=True),

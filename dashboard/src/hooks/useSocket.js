@@ -1,19 +1,18 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { io } from 'socket.io-client';
 
-const SOCKET_URL = 'http://localhost:3000';
-
-// Singleton ở cấp module: mọi component dùng chung một kết nối socket duy nhất
+// Kết nối về cùng origin → Vite proxy forwarding đến backend HTTPS
 // tránh tạo nhiều kết nối khi component re-render hoặc mount/unmount
 let _socket = null;
 
 function getSocket() {
   if (!_socket) {
-    _socket = io(SOCKET_URL, {
-      autoConnect: false,        // Không tự kết nối ngay, đợi useSocket gọi connect()
-      reconnection: true,        // Tự động kết nối lại khi mất mạng
-      reconnectionDelay: 1000,   // Chờ 1 giây trước khi thử lại
-      reconnectionAttempts: Infinity, // Thử lại vô hạn lần
+    _socket = io({
+      path: '/socket.io',
+      autoConnect: false,
+      reconnection: true,
+      reconnectionDelay: 1000,
+      reconnectionAttempts: Infinity,
     });
   }
   return _socket;

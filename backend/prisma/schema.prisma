@@ -93,3 +93,19 @@ model User {
   twoFactorEnabled Boolean  @default(false)
   createdAt        DateTime @default(now())
 }
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  timestamp DateTime @default(now())
+  username  String
+  role      String
+  action    String
+  resource  String?
+  detail    String?
+  ip        String?
+  outcome   String   @default("success")
+
+  @@index([timestamp])
+  @@index([username])
+  @@index([action])
+}

@@ -1,5 +1,6 @@
 const { PrismaClient } = require('@prisma/client');
 const { X509Certificate } = require('crypto');
+const { logAudit } = require('../lib/audit');
 
 const prisma = new PrismaClient();
 
@@ -42,6 +43,7 @@ exports.addKey = async (req, res) => {
       update: { certPem, keyPem, label: label || null, addedBy: req.user?.username, addedAt: new Date() },
     });
 
+    await logAudit(req, 'AGENT_KEY_ADD', `agent:${agentId}`, `label=${label || ''}`, 'success');
     const { keyPem: _k, ...safeKey } = agentKey;
     res.status(201).json({ ...safeKey, certInfo: parseCertInfo(certPem) });
   } catch (err) {
@@ -72,6 +74,7 @@ exports.deleteKey = async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Không tìm thấy key' });
 
     await prisma.agentKey.delete({ where: { agentId: req.params.agentId } });
+    await logAudit(req, 'AGENT_KEY_DELETE', `agent:${req.params.agentId}`, null, 'success');
     res.json({ ok: true });
   } catch (err) {
     console.error('[AgentKey] deleteKey error:', err);
@@ -86,6 +89,7 @@ exports.exportKey = async (req, res) => {
     const key = await prisma.agentKey.findUnique({ where: { agentId: req.params.agentId } });
     if (!key) return res.status(404).json({ error: 'Chưa có key cho agent này' });
 
+    await logAudit(req, 'AGENT_KEY_EXPORT', `agent:${req.params.agentId}`, null, 'success');
     res.json({ certPem: key.certPem, keyPem: key.keyPem, label: key.label });
   } catch (err) {
     console.error('[AgentKey] exportKey error:', err);

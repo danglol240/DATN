@@ -3,7 +3,6 @@ const { X509Certificate } = require('crypto');
 const { PrismaClient } = require('@prisma/client');
 
 const prisma     = new PrismaClient();
-const API_KEY    = process.env.API_KEY;
 const JWT_SECRET = process.env.JWT_SECRET;
 
 // JWT_SECRET bắt buộc — không fallback về hardcoded string
@@ -12,21 +11,6 @@ if (!JWT_SECRET) {
   console.error('        Chạy: node -e "console.log(require(\'crypto\').randomBytes(48).toString(\'hex\'))"');
   console.error('        rồi thêm JWT_SECRET=<kết quả> vào backend/.env');
   process.exit(1);
-}
-
-// Xác thực X-Agent-Key cho các route mà agent gọi (heartbeat, events, commands/result)
-function agentAuth(req, res, next) {
-  if (!API_KEY) {
-    console.warn('[AUTH] WARNING: API_KEY chưa cấu hình — bỏ qua xác thực agent');
-    return next();
-  }
-
-  const key = req.headers['x-agent-key'];
-  if (!key || key !== API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized: X-Agent-Key không hợp lệ' });
-  }
-
-  next();
 }
 
 // Xác thực JWT Bearer token cho các route mà dashboard gọi.
@@ -102,4 +86,4 @@ async function agentCertAuth(req, res, next) {
   }
 }
 
-module.exports = { agentAuth, agentCertAuth, dashboardAuth, requireAdmin };
+module.exports = { agentCertAuth, dashboardAuth, requireAdmin };

@@ -13,7 +13,6 @@ def _make_handler(command_callback):
                 self.end_headers()
                 return
 
-            # Không cần X-Backend-Key — mTLS đã xác thực danh tính backend tại TLS handshake
             length = int(self.headers.get('Content-Length', 0))
             try:
                 cmd = json.loads(self.rfile.read(length))
@@ -36,17 +35,16 @@ def _make_handler(command_callback):
     return _Handler
 
 
-def run_agent_server(port, cert_path, key_path, ca_cert_path, command_callback):
+def run_agent_server(port, cert_path, key_path, backend_cert_path, command_callback):
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert_path, key_path)
 
-    # mTLS: yêu cầu backend phải trình client cert được ký bởi CA chung
-    if ca_cert_path:
+    if backend_cert_path:
         ctx.verify_mode = ssl.CERT_REQUIRED
-        ctx.load_verify_locations(ca_cert_path)
-        logging.info(f'[AgentServer] mTLS enabled — verify client cert via {ca_cert_path}')
+        ctx.load_verify_locations(backend_cert_path)
+        logging.info(f'[AgentServer] mTLS enabled — pin-verify backend cert: {backend_cert_path}')
     else:
-        logging.warning('[AgentServer] ca_cert không cấu hình — bỏ qua verify client cert')
+        logging.warning('[AgentServer] backend_cert không cấu hình — bỏ qua verify client cert')
 
     srv = HTTPServer(('0.0.0.0', port), _make_handler(command_callback))
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)

@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const { logAudit } = require('../lib/audit');
 const prisma = new PrismaClient();
 
 // GET /api/alerts - Dashboard đọc danh sách alert
@@ -30,6 +31,7 @@ exports.resolveAlert = async (req, res) => {
       where: { id: req.params.id },
       data: { resolved: true }
     });
+    await logAudit(req, 'ALERT_RESOLVE', `alert:${req.params.id}`, `rule=${alert.ruleName}`, 'success');
     res.json(alert);
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });

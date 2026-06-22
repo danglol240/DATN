@@ -6,6 +6,7 @@ const { generateSecret, verifySync, generateURI } = require('otplib');
 const QRCode = require('qrcode');
 const { PrismaClient } = require('@prisma/client');
 const { dashboardAuth } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
 
 const prisma = new PrismaClient();
 const JWT_SECRET   = process.env.JWT_SECRET; // bắt buộc — middleware/auth.js đã kiểm tra khi khởi động
@@ -34,19 +35,27 @@ router.post('/login', async (req, res) => {
     return res.status(400).json({ error: 'username và password là bắt buộc' });
 
   const user = await prisma.user.findUnique({ where: { username } });
-  if (!user) return res.status(401).json({ error: 'Sai username hoặc password' });
+  if (!user) {
+    await logAudit(req, 'LOGIN_FAIL', `user:${username}`, 'User không tồn tại', 'failure');
+    return res.status(401).json({ error: 'Sai username hoặc password' });
+  }
 
   const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(401).json({ error: 'Sai username hoặc password' });
+  if (!valid) {
+    await logAudit(req, 'LOGIN_FAIL', `user:${username}`, 'Sai password', 'failure');
+    return res.status(401).json({ error: 'Sai username hoặc password' });
+  }
 
   // Nếu 2FA đã bật → trả tempToken, client phải xác thực OTP tiếp theo
   if (user.twoFactorEnabled) {
+    await logAudit(req, 'LOGIN_2FA_PENDING', `user:${username}`, 'Chờ OTP');
     return res.json({
       requires2FA: true,
       tempToken: signTemp(user.id),
     });
   }
 
+  await logAudit(req, 'LOGIN_SUCCESS', `user:${username}`, null, 'success');
   res.json({
     token: signFull(user),
     user: { id: user.id, username: user.username, role: user.role },
@@ -75,9 +84,12 @@ router.post('/verify-2fa', async (req, res) => {
     return res.status(400).json({ error: '2FA chưa được cấu hình' });
 
   const { valid } = verifySync({ token: code.replace(/\s/g, ''), secret: user.twoFactorSecret });
-  if (!valid)
+  if (!valid) {
+    await logAudit(req, 'LOGIN_2FA_FAIL', `user:${user.username}`, 'OTP không đúng', 'failure');
     return res.status(401).json({ error: 'Mã OTP không đúng hoặc đã hết hạn' });
+  }
 
+  await logAudit(req, 'LOGIN_SUCCESS', `user:${user.username}`, '2FA verified', 'success');
   res.json({
     token: signFull(user),
     user: { id: user.id, username: user.username, role: user.role },

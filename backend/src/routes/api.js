@@ -8,15 +8,17 @@ const alertController  = require('../controllers/alertController');
 const commandController = require('../controllers/commandController');
 const agentKeyController = require('../controllers/agentKeyController');
 const { processResult } = require('../lib/resultConsumer');
-const { agentAuth, agentCertAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
+const { agentCertAuth, dashboardAuth, requireAdmin } = require('../middleware/auth');
+const { logAudit } = require('../lib/audit');
+const auditLogController = require('../controllers/auditLogController');
 
 const prisma = new PrismaClient();
 
-// ─── Agent routes — xác thực bằng X-Agent-Key ────────────────────────────────
+// ─── Agent routes — xác thực bằng mTLS cert pinning ──────────────────────────
 
-router.post('/heartbeat', agentAuth, agentCertAuth, agentController.heartbeat);
+router.post('/heartbeat', agentCertAuth, agentController.heartbeat);
 
-router.post('/events', agentAuth, agentCertAuth, async (req, res) => {
+router.post('/events', agentCertAuth, async (req, res) => {
   try {
     const { agentId, type, data } = req.body;
     if (!agentId || !type)
@@ -51,7 +53,7 @@ router.post('/events', agentAuth, agentCertAuth, async (req, res) => {
 
 // Kết quả lệnh từ agent gửi thẳng về qua HTTP (primary path).
 // Nếu agent không reach được backend, fallback RPUSH results:queue → BLPOP consumer xử lý.
-router.post('/commands/result', agentAuth, agentCertAuth, async (req, res) => {
+router.post('/commands/result', agentCertAuth, async (req, res) => {
   const { commandId, agentId, status, result } = req.body;
   if (!commandId || !agentId || !status)
     return res.status(400).json({ error: 'commandId, agentId, status là bắt buộc' });
@@ -68,7 +70,7 @@ router.post('/commands/result', agentAuth, agentCertAuth, async (req, res) => {
 
 // ─── Dashboard routes — xác thực bằng JWT Bearer token ───────────────────────
 
-// ─── Agent Key Management — thêm cert+key thủ công (không cần PKI) ──────────
+// ─── Agent Key Management ─────────────────────────────────────────────────────
 
 router.post('/agents/:agentId/keys',       dashboardAuth, requireAdmin, agentKeyController.addKey);
 router.get('/agents/:agentId/keys',        dashboardAuth, requireAdmin, agentKeyController.getKey);
@@ -112,7 +114,13 @@ router.post('/agents/:agentId/rules', dashboardAuth, requireAdmin, async (req, r
     where: { id: req.params.agentId },
     data: { rulesConfig: JSON.stringify(config) }
   });
+  await logAudit(req, 'RULES_UPDATE', `agent:${req.params.agentId}`, null, 'success');
   res.json({ success: true });
 });
+
+// ─── Audit Log routes — admin only ───────────────────────────────────────────
+
+router.get('/audit-logs',        dashboardAuth, requireAdmin, auditLogController.listAuditLogs);
+router.get('/audit-logs/export', dashboardAuth, requireAdmin, auditLogController.exportCsv);
 
 module.exports = router;

@@ -49,3 +49,4 @@ prisma/migrations/
 
 # Package lock (optional, remove if you want to keep it)
 package-lock.json
+*.tex

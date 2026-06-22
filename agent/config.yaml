@@ -1,34 +1,20 @@
 backend_url: "https://localhost:3000"
 heartbeat_interval: 30
-api_key: "cafd410948f5033b70143a795ac385b8d8a3d1d89fdc4bf443091dd9449c32ed"
+# Sinh cert: openssl req -x509 -newkey rsa:2048 -keyout agent.key -out agent.crt \
+#              -days 3650 -nodes -subj "/CN=$(hostname)/O=EDR" \
+#              -addext "subjectAltName=DNS:$(hostname),IP:127.0.0.1"
+# Thêm vào agent: python add_key.py --cert agent.crt --key agent.key [--backend-cert backend.crt]
+# Đăng ký lên backend: Dashboard → Agents → ⋮ → Manage TLS Key
 
-# ── Chứng chỉ TLS của agent ──────────────────────────────────────────────────
-# Hai cách cấu hình:
-#
-#  [A] Không cần PKI — thêm key thủ công (khuyến nghị):
-#       1. Sinh key pair:
-#            openssl req -x509 -newkey rsa:2048 -keyout agent.key -out agent.crt \
-#              -days 3650 -nodes -subj "/CN=$(hostname)/O=EDR"
-#       2. Chạy: python add_key.py --cert agent.crt --key agent.key [--backend-cert backend.crt]
-#       3. Đăng ký cert+key lên backend DB qua dashboard: Agents → ⋮ → Manage TLS Key
-#
-#  [B] Enrollment PKI (cũ):
-#       Chạy agent lần đầu không có cert → agent tự nhập code và enroll với CA.
-#
-# ssl_verify: path tới cert để verify TLS của backend.
-#   - Nếu dùng manual key (không PKI): trỏ tới cert của backend (cert pinning).
-#   - Nếu dùng PKI: trỏ tới ca-cert.pem do CA cấp.
-#   - false: bỏ qua TLS verify (dev only).
-
-ssl_verify: "./certs/ca-cert.pem"
+# ssl_verify: cert của backend để pin-verify TLS khi agent gọi lên backend.
+#   false = bỏ qua verify (dev only).
+ssl_verify: "./certs/backend-cert.pem"
 
 # Agent HTTPS server — backend push commands trực tiếp tới đây
 listen_port: 8443
 agent_cert: "./certs/agent-cert.pem"
 agent_key:  "./certs/agent-key.pem"
 
-# ca_cert: cert dùng để verify client cert mà backend trình khi push lệnh (mTLS server-side).
-#   - Không PKI: trỏ tới cert của backend (self-signed, pin-verify).
-#   - PKI: trỏ tới ca-cert.pem.
-#   - Bỏ trống / null: bỏ qua verify client cert (không khuyến nghị).
-ca_cert: "./certs/ca-cert.pem"
+# backend_cert: cert của backend để pin-verify client cert khi backend push lệnh (mTLS).
+#   null = bỏ qua verify (không khuyến nghị).
+backend_cert: "./certs/backend-cert.pem"
